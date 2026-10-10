@@ -110,7 +110,7 @@ ancestor that accepts drops (the main window).
 
 ### Adding an overlay in M3 (crop rectangle)
 ```python
-crop = CropItem(doc, parent=canvas.image_item)   # a QGraphicsItem subclass
+crop = CropItem(doc, parent=canvas.image_item)  # a QGraphicsItem subclass
 # Inside CropItem everything is in image pixels: QRectF(c.x, c.y, c.w, c.h).
 ```
 - Parent the item to `canvas.image_item` (or add it to `canvas.scene()` at (0, 0); the
