@@ -88,6 +88,8 @@ class Document(QObject):
         self.undo_stack.clear()
         self.sourceChanged.emit()
         self.stateChanged.emit(self._state)
+        self.currentIndexChanged.emit(0)
+        self.selectionChanged.emit(self._selection)
 
     # ------------------------------------------------------------------ state
     @property
