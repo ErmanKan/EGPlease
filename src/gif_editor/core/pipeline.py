@@ -2,7 +2,7 @@
 
 Order (see AGENTS.md): ``timeline.plan_output`` decides which source frames are
 emitted and their delays; each emitted frame is then rendered
-(crop -> resize) and quantized, and streamed into ``encoder.write_gif``.
+(crop -> resize), quantized onto one shared palette, and streamed into ``encoder.write_gif``.
 The UI's summary, the live preview and Generate all use the same functions here,
 so what the user sees is what gets written.
 """
@@ -19,9 +19,16 @@ from pathlib import Path
 from PIL import Image
 
 from gif_editor.core.decoder import GifSource, SourceMeta
-from gif_editor.core.encoder import write_gif
+from gif_editor.core.encoder import read_back, write_gif
 from gif_editor.core.models import EditState
-from gif_editor.core.render import output_dimensions, quantize, render_frame
+from gif_editor.core.render import (
+    Palette,
+    build_palette,
+    output_dimensions,
+    quantize,
+    render_frame,
+    sample_indices,
+)
 from gif_editor.core.timeline import TimelinePlan, plan_output
 
 ProgressFn = Callable[[int, int | None], None]
@@ -66,13 +73,55 @@ def render_output_frame(source: GifSource, src_index: int, state: EditState) -> 
     return render_frame(source.frame(src_index), state.crop, state.size)
 
 
+def output_palette(source: GifSource, state: EditState, timeline: TimelinePlan) -> Palette:
+    """One shared palette for the whole output, from up to 16 evenly spaced output frames.
+
+    A transparent index is reserved whenever the source has any transparency, so every
+    output frame can be mapped onto this palette.
+    """
+    frames = timeline.frames
+    if not frames:
+        raise ValueError("cannot build a palette for an empty timeline")
+    samples = [
+        render_output_frame(source, frames[i].src_index, state) for i in sample_indices(len(frames))
+    ]
+    return build_palette(samples, state.quality, transparent=source.meta.has_transparency)
+
+
 def iter_output_frames(
-    source: GifSource, state: EditState, timeline: TimelinePlan
+    source: GifSource,
+    state: EditState,
+    timeline: TimelinePlan,
+    palette: Palette | None = None,
 ) -> Iterator[tuple[Image.Image, int]]:
-    """Lazily yield ``(P-mode frame, delay_cs)`` for every planned output frame."""
+    """Lazily yield ``(P-mode frame, delay_cs)`` for every planned output frame.
+
+    Every frame is mapped onto one shared palette (``palette`` or, if omitted, the
+    result of `output_palette`), and with dithering the previous frame's index is kept
+    wherever the rendered pixel did not change, so static areas never shimmer.
+    """
+    if palette is None:
+        palette = output_palette(source, state, timeline)
+    prev: tuple[Image.Image, Image.Image] | None = None
     for out in timeline.frames:
         rgba = render_output_frame(source, out.src_index, state)
-        yield quantize(rgba, state.quality), out.delay_cs
+        p = quantize(rgba, state.quality, palette, prev)
+        prev = (rgba, p)
+        yield p, out.delay_cs
+
+
+def _verifier(timeline: TimelinePlan) -> Callable[[Path], None]:
+    expected = [f.delay_cs * 10 for f in timeline.frames]
+
+    def verify(path: Path) -> None:
+        count, durations = read_back(path)
+        if count != len(expected) or durations != expected:
+            raise RuntimeError(
+                f"written GIF failed verification: {count} frames / durations "
+                f"{durations[:8]}... expected {len(expected)} frames / {expected[:8]}..."
+            )
+
+    return verify
 
 
 def generate(
@@ -84,20 +133,24 @@ def generate(
     cancel: threading.Event | None = None,
 ) -> GenerateResult:
     """Write the edited GIF atomically. Raises ``ValueError`` if nothing would be output
-    and ``encoder.Cancelled`` if ``cancel`` is set."""
+    and ``encoder.Cancelled`` if ``cancel`` is set.
+
+    The source's loop setting is kept as is (no loop extension -> none written).  The
+    temporary file is read back before it replaces ``out_path``; a frame count or
+    duration mismatch raises ``RuntimeError`` and leaves ``out_path`` untouched."""
     meta = source.meta
     timeline = plan(meta, state)
     if timeline.frame_count == 0:
         reason = "; ".join(timeline.warnings) or "no frames left"
         raise ValueError(f"nothing to generate: {reason}")
-    loop = meta.loop if meta.loop is not None else 0
     path = write_gif(
         iter_output_frames(source, state, timeline),
         out_path,
-        loop=loop,
+        loop=meta.loop,  # None (no loop block: plays once) stays None
         total=timeline.frame_count,
         progress=progress,
         cancel=cancel,
+        verify=_verifier(timeline),
     )
     w, h = output_dimensions(meta.width, meta.height, state.crop, state.size)
     return GenerateResult(
