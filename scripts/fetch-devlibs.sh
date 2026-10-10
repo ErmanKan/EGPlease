@@ -3,8 +3,10 @@
 # into ./.devlibs (project-local, gitignored). Nothing is installed system-wide and no
 # package maintainer scripts run: the .deb is only unpacked with `dpkg-deb -x`.
 #
-# Trust chain: Debian archive key (local keyring) -> signed InRelease -> Packages index
-# hash -> package SHA256 (pinned below and re-checked).
+# What this script verifies: the package's SHA-256 against the pin below.
+# How the pin was obtained (one-time, manual; see docs/codebase/scripts/fetch-devlibs.md):
+# Debian archive key -> `sqv --message` on the signed InRelease -> Packages index hash ->
+# the package SHA-256 listed in that index.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

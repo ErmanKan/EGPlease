@@ -94,7 +94,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- actions
     def _action(self, text: str, slot, shortcut=None, *, tip: str = "") -> QAction:
         act = QAction(text, self)
-        if shortcut is not None:
+        if isinstance(shortcut, QKeySequence.StandardKey):
+            act.setShortcuts(shortcut)  # all platform bindings, not just the first
+        elif shortcut is not None:
             act.setShortcut(QKeySequence(shortcut))
         if tip:
             act.setStatusTip(tip)
@@ -115,13 +117,13 @@ class MainWindow(QMainWindow):
         self.act_save_frame_edited = self._action(
             "Save frame with crop/size\u2026", lambda: self.save_frame_dialog(True)
         )
-        self.act_close = self._action("&Close", self.doc.close, sc.Close)
-        self.act_quit = self._action("&Quit", self.close, sc.Quit)
+        self.act_close = self._action("&Close", self.doc.close, "Ctrl+W")
+        self.act_quit = self._action("&Quit", self.close, "Ctrl+Q")
 
         self.act_undo = self.doc.undo_stack.createUndoAction(self, "&Undo")
-        self.act_undo.setShortcut(sc.Undo)
+        self.act_undo.setShortcuts(sc.Undo)
         self.act_redo = self.doc.undo_stack.createRedoAction(self, "&Redo")
-        self.act_redo.setShortcuts([QKeySequence(sc.Redo), QKeySequence("Ctrl+Y")])
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
         self.addActions([self.act_undo, self.act_redo])
         self.act_delete = self._action("&Delete frame(s)", insp.filmstrip.delete_selected, "Del")
         self.act_restore = self._action(
@@ -297,6 +299,14 @@ class MainWindow(QMainWindow):
     def generate_dialog(self) -> None:
         if not self.doc.is_open or self._generating:
             return
+        try:
+            empty = self.doc.plan().frame_count == 0
+        except ValueError as exc:
+            self.show_error(str(exc))
+            return
+        if empty:  # same guard as the Generate button, so Ctrl+G can't bypass it
+            self.show_error("Nothing to generate: every frame is deleted or trimmed away.")
+            return
         src = self.doc.path
         suggestion = str(src.with_name(f"{src.stem}-edited.gif")) if src else "output.gif"
         path, _ = QFileDialog.getSaveFileName(self, "Generate GIF", suggestion, GIF_FILTER)
@@ -311,9 +321,14 @@ class MainWindow(QMainWindow):
         if source is None or self._generating:
             return
         try:
-            total = self.doc.plan().frame_count
+            plan = self.doc.plan()
         except ValueError as exc:
             self.show_error(str(exc))
+            return
+        total = plan.frame_count
+        if total == 0:
+            reason = "; ".join(plan.warnings) or "every frame is deleted or trimmed away"
+            self.show_error(f"Nothing to generate: {reason}")
             return
         path = Path(path)
         self.player.pause()
@@ -344,12 +359,14 @@ class MainWindow(QMainWindow):
             finish()
             self.last_result = result
             kb = result.size_bytes / 1024
-            self.statusBar().showMessage(
+            msg = (
                 f"Saved {result.path.name}: {result.frame_count} frames, "
                 f"{result.duration_ms / 1000:.2f} s, {result.width}\u00d7{result.height}, "
-                f"{kb:,.1f} KB",
-                10000,
+                f"{kb:,.1f} KB"
             )
+            if result.warnings:
+                msg += " \u2014 " + "; ".join(result.warnings)
+            self.statusBar().showMessage(msg, 15000)
 
         def failed(message: str, exc: BaseException) -> None:
             finish()

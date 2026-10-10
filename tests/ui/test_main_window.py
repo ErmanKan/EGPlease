@@ -134,6 +134,32 @@ def test_generate_cancel_leaves_nothing(qtbot, win, tmp_path):
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
 
+def test_shortcuts_cover_platform_bindings(win):
+    redo = {s.toString() for s in win.act_redo.shortcuts()}
+    assert {"Ctrl+Y", "Ctrl+Shift+Z"} <= redo
+    assert win.act_close.shortcut().toString() == "Ctrl+W"
+    assert win.act_quit.shortcut().toString() == "Ctrl+Q"
+
+
+def test_ctrl_g_refuses_empty_output(qtbot, win, gif_path, tmp_path):
+    _open(qtbot, win, gif_path)
+    win.doc.set_trim(0, 100, merge_key=None)
+    win.doc.delete_frames({0})
+    win.generate_dialog()  # must not open a file dialog
+    assert "Nothing to generate" in win.last_error and not win.is_busy
+    win.generate_to(tmp_path / "x.gif")
+    assert not (tmp_path / "x.gif").exists() and not win.is_busy
+
+
+def test_generate_reports_warnings(qtbot, win, gif_path, tmp_path):
+    _open(qtbot, win, gif_path)
+    win.doc.apply(win.doc.state.with_(speed=4.0), "speed")  # 100 ms / 4 = 25 ms: rounding warning
+    win.generate_to(tmp_path / "w.gif")
+    qtbot.waitUntil(lambda: win.last_result is not None, timeout=15000)
+    if win.last_result.warnings:
+        assert win.last_result.warnings[0] in win.statusBar().currentMessage()
+
+
 def test_save_frame_png(qtbot, win, gif_path, tmp_path):
     _open(qtbot, win, gif_path)
     win.doc.set_current_index(3)
