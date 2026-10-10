@@ -90,12 +90,14 @@ D10 = [100] * 10  # frames start at 0, 100, ..., 900
     [
         (0, None, tuple(range(10)), (10,) * 10),
         (300, None, tuple(range(3, 10)), (10,) * 7),  # exact frame boundary
-        (250, None, tuple(range(3, 10)), (10,) * 7),  # mid-frame: frame 2 starts before window
+        (250, None, tuple(range(2, 10)), (5,) + (10,) * 7),  # frame 2 visible at 250: clipped
         (300, 300, (3, 4, 5), (10, 10, 10)),  # exact window
         (0, 250, (0, 1, 2), (10, 10, 5)),  # last kept frame shortened
-        (250, 200, (3, 4), (10, 5)),  # window [250,450): frames 3,4; 4 cut to 50 ms
+        (250, 200, (2, 3, 4), (5, 10, 5)),  # window [250,450): 2 and 4 clipped to 50 ms
         (900, None, (9,), (10,)),  # last frame only
-        (899, None, (9,), (10,)),
+        (899, None, (9,), (10,)),  # frame 8 clipped to 1 ms, folded into frame 9
+        (950, None, (9,), (5,)),  # start inside the last frame
+        (50, 100, (0, 1), (5, 5)),
         (0, 10_000, tuple(range(10)), (10,) * 10),  # duration past end is harmless
         (0, 100, (0,), (10,)),  # window end exactly at frame boundary
         (0, 120, (0, 1), (10, 2)),  # 20 ms tail survives
@@ -122,9 +124,27 @@ def test_trim_start_beyond_end(start):
     assert len(p.warnings) == 1 and "beyond" in p.warnings[0]
 
 
-def test_trim_start_inside_last_frame_gives_empty():
-    p = plan(D10, trim_start_ms=950)
-    assert p.frames == () and p.warnings
+def test_trim_keeps_partial_frames_duration_exact():
+    p = plan([1000, 1000], trim_start_ms=500, trim_duration_ms=1000)
+    assert p.src_indices == (0, 1)
+    assert p.delays_cs == (50, 50)
+    assert p.duration_ms == 1000
+    assert p.warnings == ()
+
+
+def test_trim_start_inside_single_long_frame():
+    p = plan([5000], trim_start_ms=100)
+    assert p.src_indices == (0,)
+    assert p.delays_cs == (490,)
+    assert p.duration_ms == 4900
+
+
+@pytest.mark.parametrize("start", [0, 1, 37, 250, 333, 899, 999])
+@pytest.mark.parametrize("dur", [None, 1, 20, 150, 333, 5000])
+def test_trim_duration_is_window_length(start, dur):
+    p = plan(D10, trim_start_ms=start, trim_duration_ms=dur)
+    expected = min(1000, start + dur) - start if dur is not None else 1000 - start
+    assert abs(p.duration_ms - max(expected, 20)) < 10
 
 
 # --- delete -------------------------------------------------------------------------
@@ -224,12 +244,50 @@ def test_fps_higher_than_source_unchanged(fps):
 
 
 def test_fps_preserves_total_with_partial_tick():
-    # 210 ms, ticks at 0/100/200 hit frames 0 [0,30), 3 [90,120) and 6 [180,210);
-    # kept frames keep their real start times, dropped frames' time goes to the previous one.
+    # 210 ms, ticks at 0/100/200 show frames 0, 3, 6; slots are 100, 100, 10 ms.
+    # The truncated 10 ms tail is shorter than the 100 ms step -> merged into frame 3.
     p = plan([30] * 7, fps=10)
-    assert p.src_indices == (0, 3, 6)
-    assert p.delays_cs == (9, 9, 3)
+    assert p.src_indices == (0, 3)
+    assert p.delays_cs == (10, 11)
     assert p.duration_ms == 210
+
+
+def test_fps_30_to_24_uniform_grid():
+    p = plan([100] * 30, speed=3.0, fps=24)  # 33.33 ms frames on a 41.67 ms grid
+    assert set(p.delays_cs) <= {4, 5}
+    assert p.frame_count == 24
+    assert abs(p.duration_ms - 1000) < 10
+
+
+def test_fps_cap_uneven_33_34_33():
+    p = plan([33, 34, 33] * 10, fps=24)
+    assert set(p.delays_cs) <= {4, 5}
+    assert abs(p.duration_ms - 1000) < 10
+    assert p.frame_count == 24
+
+
+def test_fps_sole_frame_shorter_than_step():
+    p = plan([30, 30], fps=5)  # 60 ms total < 200 ms step
+    assert p.src_indices == (0,)
+    assert p.delays_cs == (6,)
+
+
+def test_fps_random_cap_enforced():
+    rng = random.Random(99)
+    for _ in range(400):
+        n = rng.randint(2, 120)
+        d = [rng.choice([10, 20, 33, 34, 40, 50, 70, rng.randint(1, 300)]) for _ in range(n)]
+        fps = rng.choice([1, 5, 10, 12.5, 15, 24, 25, 30, 50, rng.uniform(0.5, 50)])
+        speed = rng.choice([0.5, 1.0, 1.7, 3.0])
+        p = plan(d, fps=fps, speed=speed)
+        step = 1000 / fps
+        ms = [c * 10 for c in p.delays_cs]
+        assert all(x >= step - 10 for x in ms[:-1]), (d, fps, speed, ms)
+        if p.frame_count > 1:
+            assert p.frame_count / (p.duration_ms / 1000) <= fps * 1.02 + 0.5
+        idx = p.src_indices
+        assert all(a < b for a, b in itertools.pairwise(idx))
+        assert abs(p.duration_ms - max(sum(d) / speed, 20)) < 10
 
 
 def test_fps_after_speed():
@@ -246,6 +304,34 @@ def test_fps_order_preserved_no_duplicates():
         idx = p.src_indices
         assert list(idx) == sorted(set(idx))
         assert abs(p.duration_ms - sum(d)) < 10
+
+
+# --- GIF max delay -----------------------------------------------------------------------
+
+SPLIT_WARN = "Long frame split: GIF max delay is 655.35 s"
+
+
+def test_long_delay_split():
+    p = plan([655350], speed=0.25)  # 2621.4 s = 262140 cs
+    assert p.delays_cs == (65535,) * 4
+    assert p.src_indices == (0,) * 4
+    assert p.duration_ms == 2_621_400
+    assert SPLIT_WARN in p.warnings
+
+
+def test_long_delay_split_uneven_and_neighbours():
+    p = plan([100, 655360, 100])  # 65536 cs -> 32768 + 32768
+    assert p.src_indices == (0, 1, 1, 2)
+    assert p.delays_cs == (10, 32768, 32768, 10)
+    assert all(c <= 65535 for c in p.delays_cs)
+    assert p.duration_ms == 655_560
+    assert p.warnings == (SPLIT_WARN,)
+
+
+def test_max_delay_not_split():
+    p = plan([655350])
+    assert p.delays_cs == (65535,)
+    assert p.warnings == ()
 
 
 # --- rounding -------------------------------------------------------------------------------
@@ -287,24 +373,25 @@ def test_combined_pipeline():
 # --- properties ------------------------------------------------------------------------------
 
 
-def _exact_ms(delays, st: EditState) -> float:
+def _overlaps(delays, st: EditState) -> dict[int, int]:
+    """Clipped visible time of each non-deleted source frame inside the trim window."""
     total = sum(delays)
     start = st.trim_start_ms
-    end = total if st.trim_duration_ms is None else start + st.trim_duration_ms
-    t = 0
-    acc = 0
-    for i, d in enumerate(delays):
-        if start <= t < end and i not in st.deleted:
-            acc += min(d, end - t)
-        t += d
-    return acc / st.speed
+    end = total if st.trim_duration_ms is None else min(total, start + st.trim_duration_ms)
+    out = {}
+    for i, (s, d) in enumerate(zip(start_times_ms(delays), delays, strict=True)):
+        ov = min(s + d, end) - max(s, start)
+        if ov > 0 and i not in st.deleted:
+            out[i] = ov
+    return out
+
+
+def _exact_ms(delays, st: EditState) -> float:
+    return sum(_overlaps(delays, st).values()) / st.speed
 
 
 def _kept(delays, st: EditState) -> set[int]:
-    total = sum(delays)
-    end = total if st.trim_duration_ms is None else st.trim_start_ms + st.trim_duration_ms
-    starts = start_times_ms(delays)
-    return {i for i, s in enumerate(starts) if st.trim_start_ms <= s < end and i not in st.deleted}
+    return set(_overlaps(delays, st))
 
 
 def test_random_invariants():
@@ -333,6 +420,9 @@ def test_random_invariants():
         idx = p.src_indices
         assert all(a < b for a, b in itertools.pairwise(idx))
         assert set(idx) <= kept
+        if st.fps is not None:
+            step = 1000 / st.fps
+            assert all(c * 10 >= step - 10 for c in p.delays_cs[:-1]), (delays, st, p)
         assert p.duration_ms == sum(p.delays_cs) * 10
         exact = _exact_ms(delays, st)
         if exact >= 20:

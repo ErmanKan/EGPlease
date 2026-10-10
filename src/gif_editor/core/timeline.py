@@ -4,22 +4,26 @@
 ``EditState`` into a ``TimelinePlan`` (source frame index + integer centisecond
 delay per output frame). Pipeline, in order:
 
-1. **Trim** (source time). The window is ``[trim_start_ms, trim_start_ms +
-   trim_duration_ms)`` (``None`` duration = to the end). A frame is kept iff its
-   *start time* lies inside the window. Consequently a frame that starts before
-   ``trim_start_ms`` is dropped even if it is still visible at that instant
-   (trimming never shows a frame that "began" before the cut). The last kept
-   frame is shortened so it does not extend past the window end.
+1. **Trim** (source time). The window is ``[trim_start_ms, min(trim_start_ms +
+   trim_duration_ms, total))`` (``None`` duration = to the end), so *Duration*
+   is the length of the trimmed section from *Start time*. Every frame visible
+   inside the window is kept and clipped to it: the frame visible at
+   ``trim_start_ms`` is shortened to start there, the frame visible at the
+   window end is shortened to end there. The output covers exactly the window.
+   ``trim_start_ms >= total`` gives an empty plan with a warning.
 2. **Delete**: frames whose source index is in ``state.deleted`` are removed
-   together with their time (the GIF gets shorter).
+   together with their (clipped) time (the GIF gets shorter).
 3. **Speed**: each delay is divided by ``state.speed`` (exact floats).
-4. **FPS** (``state.fps`` not ``None``): sample the concatenated timeline on a
-   uniform grid of step ``1000 / fps`` ms starting at 0. A frame is output iff
-   at least one tick falls inside ``[start, end)``; a frame no tick hits is
-   dropped and its time is added to the previous output frame. Output frames
-   keep their real start times (they are not snapped to the grid), so when the
-   source is already slower than ``fps`` the timing is unchanged. Frames are
-   only dropped, never duplicated; order and total duration are preserved.
+4. **FPS cap** (``state.fps`` not ``None``), step ``T = 1000 / fps`` ms. If
+   every frame already lasts ``>= T`` the timeline is returned unchanged (the
+   source is not faster than ``fps``). Otherwise it is resampled on the uniform
+   grid ``0, T, 2T, ...``: each tick shows the frame visible at that time,
+   consecutive ticks showing the same frame merge, so every output frame lasts
+   a whole multiple of ``T``; the final slot is truncated at the total
+   duration. If the last output frame is then shorter than ``T`` it is merged
+   into the previous one (unless it is the only frame). Hence every output
+   frame lasts ``>= T`` (except a sole frame) and the total is preserved.
+   Frames are only dropped, never duplicated, and order is preserved.
 5. **Min delay** (20 ms): consecutive frames shorter than 20 ms are grouped
    left to right until the group reaches 20 ms; the group's first frame is
    emitted with the group's total time. A short run that never reaches 20 ms
@@ -29,6 +33,10 @@ delay per output frame). Pipeline, in order:
    round(end[k] / 10) - round(end[k-1] / 10)`` (round half up), so the total
    error is < 10 ms. Delays that round below 2 cs are raised to 2 cs and the
    excess is taken from the following (or, at the end, preceding) frames.
+7. **GIF max delay**: a delay above 65535 cs (655.35 s) is split into the
+   fewest consecutive ``OutputFrame`` entries with the *same* ``src_index``
+   (near-equal parts, each <= 65535 cs, total preserved) and a warning is
+   added. This is the ONLY case where a source frame appears more than once.
 
 All functions are pure and deterministic. Invalid source delays (< 1 ms) raise
 ``ValueError``; an empty result never raises — it returns an empty plan with a
@@ -46,6 +54,7 @@ from gif_editor.core.models import EditState
 
 MIN_DELAY_MS = 20
 MIN_DELAY_CS = 2
+MAX_DELAY_CS = 65535
 ROUNDING_WARN_MS = 5.0
 _EPS = 1e-6
 
@@ -102,35 +111,43 @@ def _empty(warnings: list[str]) -> TimelinePlan:
 def _trim(delays: Sequence[int], state: EditState, warnings: list[str]) -> list[tuple[int, int]]:
     total = sum(delays)
     start = state.trim_start_ms
-    end = total if state.trim_duration_ms is None else start + state.trim_duration_ms
     if start >= total:
         warnings.append(f"Trim start ({start} ms) is at or beyond the end of the GIF ({total} ms)")
         return []
+    end = total if state.trim_duration_ms is None else min(total, start + state.trim_duration_ms)
     kept: list[tuple[int, int]] = []
     t = 0
     for i, d in enumerate(delays):
         if t >= end:
             break
-        if t >= start:
-            kept.append((i, min(d, end - t)))
+        lo, hi = max(t, start), min(t + d, end)
+        if hi > lo:  # visible somewhere in the window: keep the clipped part
+            kept.append((i, hi - lo))
         t += d
-    if not kept:
-        warnings.append("No frame starts inside the trim window")
     return kept
 
 
 def _resample(frames: list[tuple[int, float]], fps: float) -> list[tuple[int, float]]:
-    """Keep frames hit by a tick of the 1000/fps grid; fold the rest into the previous one."""
+    """Cap the frame rate at ``fps`` (see module docstring, step 4)."""
     step = 1000.0 / fps
-    out: list[tuple[int, float]] = []
+    if all(d >= step - _EPS for _, d in frames):
+        return frames  # already no faster than fps: unchanged
+    # (src, first tick index) of every frame that at least one tick lands in
+    hits: list[tuple[int, int]] = []
     t = 0.0
     for src, d in frames:
-        a, b = t, t + d
-        t = b
-        if out and math.ceil(b / step - _EPS) <= math.ceil(a / step - _EPS):
-            out[-1] = (out[-1][0], out[-1][1] + d)  # no tick inside: drop, keep its time
-        else:
-            out.append((src, d))
+        k1 = math.ceil((t - _EPS) / step) if hits else 0
+        t += d
+        if math.ceil((t - _EPS) / step) > k1:
+            hits.append((src, k1))
+    total = t
+    out: list[tuple[int, float]] = []
+    for j, (src, k) in enumerate(hits):
+        end = hits[j + 1][1] * step if j + 1 < len(hits) else total
+        out.append((src, end - k * step))
+    if len(out) > 1 and out[-1][1] < step - _EPS:
+        tail = out.pop()
+        out[-1] = (out[-1][0], out[-1][1] + tail[1])
     return out
 
 
@@ -207,7 +224,7 @@ def plan_output(delays_ms: Sequence[int], state: EditState) -> TimelinePlan:
         return _empty(["The source has no frames"])
 
     kept = _trim(delays_ms, state, warnings)
-    if not kept:
+    if not kept:  # only when trim_start_ms >= total (window is never empty otherwise)
         return _empty(warnings)
 
     if state.deleted:
@@ -232,5 +249,16 @@ def plan_output(delays_ms: Sequence[int], state: EditState) -> TimelinePlan:
     if max_dev > ROUNDING_WARN_MS:
         warnings.append(f"Delays rounded to 10 ms steps (up to {max_dev:.0f} ms per frame)")
 
-    out = tuple(OutputFrame(src, c) for (src, _), c in zip(folded, cs, strict=True))
-    return TimelinePlan(out, sum(cs) * 10, tuple(warnings))
+    out: list[OutputFrame] = []
+    split = False
+    for (src, _), c in zip(folded, cs, strict=True):
+        if c <= MAX_DELAY_CS:
+            out.append(OutputFrame(src, c))
+            continue
+        split = True
+        n = -(-c // MAX_DELAY_CS)
+        base, extra = divmod(c, n)
+        out.extend(OutputFrame(src, base + (1 if k < extra else 0)) for k in range(n))
+    if split:
+        warnings.append("Long frame split: GIF max delay is 655.35 s")
+    return TimelinePlan(tuple(out), sum(cs) * 10, tuple(warnings))
