@@ -287,6 +287,46 @@ def _iter_checked(frames: Iterable[object]) -> Iterator[Frame]:
 # ---------------------------------------------------------------- public API
 
 
+def write_stream(
+    fp: BinaryIO,
+    frames: Iterable[Frame],
+    *,
+    loop: int | None = 0,
+    total: int | None = None,
+    progress: ProgressFn | None = None,
+    cancel: Callable[[], None] | None = None,
+) -> int:
+    """Write an animated GIF to an open binary stream; return the frame count.
+
+    This is the body of `write_gif` without the file handling, so callers that need the
+    bytes rather than a file (the size estimator) can encode into a `BytesIO`. ``cancel``
+    is a callable checked before each frame; it should raise to abort. Validation,
+    per-frame colour tables, differencing and disposal are exactly as in `write_gif`.
+    """
+    if loop is not None and (
+        isinstance(loop, bool) or not isinstance(loop, int) or not 0 <= loop <= MAX_LOOP
+    ):
+        raise ValueError(f"loop must be None or an int in 0..{MAX_LOOP}, got {loop!r}")
+    writer = _Writer(fp, loop)
+    it = _iter_checked(frames)
+    done = 0
+    while True:
+        if cancel is not None:
+            cancel()
+        try:
+            img, delay = next(it)
+        except StopIteration:
+            break
+        writer.add(img, delay)
+        done += 1
+        if progress is not None:
+            progress(done, total)
+    if done == 0:
+        raise ValueError("cannot write a GIF with no frames")
+    writer.finish()
+    return done
+
+
 def write_gif(
     frames: Iterable[Frame],
     path: str | os.PathLike[str],
@@ -346,22 +386,7 @@ def write_gif(
 
     try:
         with open(tmp, "x+b") as fp:
-            writer = _Writer(fp, loop)
-            it = _iter_checked(frames)
-            done = 0
-            while True:
-                check_cancel()
-                try:
-                    img, delay = next(it)
-                except StopIteration:
-                    break
-                writer.add(img, delay)
-                done += 1
-                if progress is not None:
-                    progress(done, total)
-            if done == 0:
-                raise ValueError("cannot write a GIF with no frames")
-            writer.finish()
+            write_stream(fp, frames, loop=loop, total=total, progress=progress, cancel=check_cancel)
             fp.flush()
             os.fsync(fp.fileno())
         check_cancel()

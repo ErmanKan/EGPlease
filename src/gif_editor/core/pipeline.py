@@ -9,6 +9,7 @@ so what the user sees is what gets written.
 
 from __future__ import annotations
 
+import io
 import os
 import threading
 import uuid
@@ -19,7 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 from gif_editor.core.decoder import GifSource, SourceMeta
-from gif_editor.core.encoder import read_back, write_gif
+from gif_editor.core.encoder import read_back, write_gif, write_stream
 from gif_editor.core.models import EditState
 from gif_editor.core.render import (
     Palette,
@@ -30,6 +31,8 @@ from gif_editor.core.render import (
     sample_indices,
 )
 from gif_editor.core.timeline import TimelinePlan, plan_output
+
+ESTIMATE_SAMPLES = 5
 
 ProgressFn = Callable[[int, int | None], None]
 
@@ -108,6 +111,63 @@ def iter_output_frames(
         p = quantize(rgba, state.quality, palette, prev)
         prev = (rgba, p)
         yield p, out.delay_cs
+
+
+def estimate_size(
+    source: GifSource,
+    state: EditState,
+    timeline: TimelinePlan,
+    *,
+    samples: int = ESTIMATE_SAMPLES,
+) -> int:
+    """Rough output size in bytes, from encoding a few real output frames in memory.
+
+    Generates the first frame plus ``samples - 1`` evenly spaced frames with the real
+    pipeline (shared palette, cropping, differencing) and extrapolates linearly:
+    ``first + average_per_frame * (count - 1)``. Returns 0 for an empty plan.
+
+    The frames sampled are a CONTIGUOUS run from the middle of the timeline, and they are
+    encoded TOGETHER as one stream. Both details matter: GIF stores every frame as the
+    difference from the previous one, so measuring frames one at a time (or sampling frames
+    far apart) wildly overestimates. The run's total size minus the cost of its first frame
+    is the real per-frame cost of an additional frame.
+
+    It is still an ESTIMATE (the UI shows it with a "~"): scenes that change a lot cost
+    more, and quantisation noise varies across the source. It encodes a handful of frames
+    (well under 100 ms for typical GIFs), so for a very large source call it off the GUI
+    thread.
+    """
+    n = timeline.frame_count
+    if n == 0:
+        return 0
+    count = max(1, min(int(samples), n))
+    start = max(0, min(n - count, (n - count) // 2))
+    palette = output_palette(source, state, timeline)
+    frames = iter_output_frames(source, state, timeline, palette)
+    window: list[tuple[Image.Image, int]] = []
+    for i, frame in enumerate(frames):
+        if i >= start:
+            window.append(frame)
+        if i >= start + count - 1:
+            break
+    if not window:
+        return 0
+    # Measure the run as ONE stream, then the first frame of the run on its own: the
+    # difference is the real cost of each additional frame (which GIF stores as a diff).
+    run_bytes = _encoded_size(window)
+    first_bytes = _encoded_size(window[:1])
+    if len(window) == 1:
+        per_frame = first_bytes
+    else:
+        per_frame = max(0.0, (run_bytes - first_bytes) / (len(window) - 1))
+    return max(0, int(first_bytes + per_frame * (n - 1)))
+
+
+def _encoded_size(frames: list[tuple[Image.Image, int]]) -> int:
+    """Bytes the real encoder produces for these frames, in memory (no files touched)."""
+    buf = io.BytesIO()
+    write_stream(buf, frames, loop=0)
+    return buf.getbuffer().nbytes
 
 
 def _verifier(timeline: TimelinePlan) -> Callable[[Path], None]:
