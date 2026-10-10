@@ -1,0 +1,34 @@
+[project]
+name = "gif-editor"
+version = "0.1.0"
+description = "Offline Windows desktop GIF editor: trim, delete frames, crop, retime, resize, re-quantize."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "PySide6-Essentials==6.12.0",
+    "pillow==12.3.0",
+    "numpy==2.5.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-qt==4.5.0",
+    "ruff==0.17.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"

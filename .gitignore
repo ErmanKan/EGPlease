@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+# Nuitka
+*.build/
+*.dist/
+*.onefile-build/
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+# Scratch
+*.tmp.gif
+/out/
