@@ -6,8 +6,16 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from gif_editor.core import render
 from gif_editor.core.models import CropRect, OutputSize, Quality
-from gif_editor.core.render import output_dimensions, quantize, render_frame
+from gif_editor.core.render import (
+    Palette,
+    build_palette,
+    output_dimensions,
+    quantize,
+    render_frame,
+    sample_indices,
+)
 
 
 def _gradient(w: int = 256, h: int = 32) -> Image.Image:
@@ -210,3 +218,135 @@ def test_gif_round_trip_transparency(tmp_path) -> None:
         back = np.asarray(re.convert("RGBA"))
     assert (back[mask][:, 3] == 0).all()
     assert (back[~mask][:, 3] == 255).all()
+
+
+# --- shared palette ----------------------------------------------------------------
+
+
+def _moving(n: int = 6, w: int = 48, h: int = 24, alpha: bool = False) -> list[Image.Image]:
+    out = []
+    for i in range(n):
+        a = np.array(_gradient(w, h))
+        a[8:14, 2 + i * 6 : 8 + i * 6] = (250, 250, 30, 255)
+        if alpha:
+            a[:4, :] = (0, 0, 0, 0)
+        out.append(Image.fromarray(a, "RGBA"))
+    return out
+
+
+def test_sample_indices() -> None:
+    assert sample_indices(0) == []
+    assert sample_indices(5) == [0, 1, 2, 3, 4]
+    s = sample_indices(100)
+    assert len(s) == 16 and s[0] == 0 and s[-1] == 99 and s == sorted(set(s))
+    assert sample_indices(100, 4) == [0, 33, 66, 99]
+
+
+def test_palette_dataclass() -> None:
+    p = Palette(((1, 2, 3), (4, 5, 6)), transparent=True)
+    assert p.transparent_index == 2 and p.size == 3
+    assert p.flat() == [1, 2, 3, 4, 5, 6, *render.TRANSPARENT_RGB]
+    assert Palette(((1, 2, 3),)).transparent_index is None
+    with pytest.raises(ValueError):
+        Palette(())
+    with pytest.raises(ValueError):
+        Palette(tuple((i, i, i) for i in range(256)), transparent=True)
+
+
+def test_build_palette_exact_for_few_colours() -> None:
+    frames = [Image.new("RGBA", (8, 8), (*c, 255)) for c in [(255, 0, 0), (0, 9, 200)]]
+    p = build_palette(frames, Quality(256))
+    assert set(p.colors) == {(255, 0, 0), (0, 9, 200)} and not p.transparent
+
+
+@pytest.mark.parametrize("n", [2, 16, 255, 256])
+def test_build_palette_respects_colour_budget(n: int) -> None:
+    for alpha in (False, True):
+        p = build_palette(_moving(alpha=alpha), Quality(n))
+        assert p.transparent is alpha
+        assert p.size <= n
+
+
+def test_build_palette_transparency_flag_and_detection() -> None:
+    assert build_palette(_moving(), Quality(16), transparent=True).transparent
+    assert build_palette(_moving(alpha=True), Quality(16)).transparent
+    p = build_palette([Image.new("RGBA", (4, 4), (0, 0, 0, 0))], Quality(4))
+    assert p.transparent and p.size == 2
+
+
+def test_build_palette_deterministic_and_validates() -> None:
+    frames = _moving(20)
+    assert build_palette(frames, Quality(32)) == build_palette(frames, Quality(32))
+    with pytest.raises(ValueError):
+        build_palette([], Quality())
+    with pytest.raises(ValueError):
+        build_palette([Image.new("RGB", (2, 2))], Quality())
+
+
+def test_build_palette_uses_at_most_16_frames() -> None:
+    seen: list[int] = []
+
+    class Spy(list):
+        def __getitem__(self, i):
+            seen.append(i)
+            return list.__getitem__(self, i)
+
+    build_palette(Spy(_moving(40, 16, 8)), Quality(16))
+    assert len(seen) <= 16 and 0 in seen and 39 in seen
+
+
+@pytest.mark.parametrize("dither", [False, True])
+def test_quantize_onto_shared_palette(dither: bool) -> None:
+    frames = _moving(alpha=True)
+    pal = build_palette(frames, Quality(32, dither))
+    outs = [quantize(f, Quality(32, dither), pal) for f in frames]
+    for f, q in zip(frames, outs, strict=True):
+        assert q.getpalette() == pal.flat()
+        idx = _indices(q)
+        mask = np.asarray(f)[..., 3] < 128
+        assert q.info["transparency"] == pal.transparent_index
+        assert (idx[mask] == pal.transparent_index).all()
+        assert (idx[~mask] < len(pal.colors)).all()
+
+
+def test_quantize_shared_exact_colours_and_dither_flag() -> None:
+    img = _gradient()
+    pal = build_palette([img], Quality(8))
+    a = _indices(quantize(img, Quality(8, False), pal))
+    b = _indices(quantize(img, Quality(8, True), pal))
+    assert not np.array_equal(a, b)
+    solid = Image.new("RGBA", (5, 5), (*pal.colors[3], 255))
+    assert (_indices(quantize(solid, Quality(8, True), pal)) == 3).all()
+
+
+def test_quantize_shared_opaque_palette_rejects_transparent_frame() -> None:
+    pal = Palette(((255, 0, 0),))
+    with pytest.raises(ValueError, match="transparent"):
+        quantize(Image.new("RGBA", (2, 2), (0, 0, 0, 0)), Quality(4), pal)
+    q = quantize(Image.new("RGBA", (2, 2), (250, 0, 0, 255)), Quality(4), pal)
+    assert "transparency" not in q.info
+
+
+def test_previous_keeps_indices_of_unchanged_pixels() -> None:
+    frames = _moving(2)
+    q = Quality(16, True)
+    pal = build_palette(frames, q)
+    p0 = quantize(frames[0], q, pal)
+    free = _indices(quantize(frames[1], q, pal))
+    stable = _indices(quantize(frames[1], q, pal, (frames[0], p0)))
+    same = (np.asarray(frames[0]) == np.asarray(frames[1])).all(axis=2)
+    assert np.array_equal(stable[same], _indices(p0)[same])
+    assert np.array_equal(stable[~same], free[~same])
+    assert not np.array_equal(free[same], _indices(p0)[same])  # FS alone would shimmer
+
+
+def test_map_to_palette_raises_on_out_of_range(monkeypatch) -> None:
+    real = Image.Image.quantize
+
+    def bad(self, *a, **kw):
+        out = real(self, *a, **kw)
+        return Image.fromarray(np.full(out.size[::-1], 7, np.uint8), "P")
+
+    monkeypatch.setattr(Image.Image, "quantize", bad)
+    with pytest.raises(RuntimeError, match="index 7"):
+        render._map_to_palette(np.zeros((2, 2, 3), np.uint8), [(0, 0, 0), (9, 9, 9)], False)

@@ -8,9 +8,11 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image
 
+from gif_editor.core.decoder import GifSource
 from gif_editor.core.encoder import Cancelled, estimate_size, read_back, write_gif
 
 SIZE = (20, 10)
@@ -79,12 +81,21 @@ def gif_frames(path: Path) -> list[dict]:
                     "disposal": (gce[0] >> 2) & 7,
                     "transparency": gce[3] if gce[0] & 1 else None,
                     "delay_cs": struct.unpack("<H", gce[1:3])[0],
+                    "local_table": bool(flags & 0x80),
                 }
             )
             gce, i = None, j + 1
         else:
             raise AssertionError(f"bad block 0x{b:02x} at {i}")
     return frames
+
+
+def has_netscape(path: Path) -> bool:
+    return b"NETSCAPE2.0" in path.read_bytes()
+
+
+def has_global_table(path: Path) -> bool:
+    return bool(path.read_bytes()[10] & 0x80)
 
 
 def rgba_frames(path: Path) -> list[Image.Image]:
@@ -94,6 +105,37 @@ def rgba_frames(path: Path) -> list[Image.Image]:
             im.seek(i)
             out.append(im.convert("RGBA"))
         return out
+
+
+def expected_rgba(img: Image.Image) -> np.ndarray:
+    """Input P frame as RGBA; transparent pixels normalised to (0, 0, 0, 0)."""
+    pal = (img.getpalette("RGB") or []) + [0] * 768
+    lut = np.zeros((256, 4), np.uint8)
+    lut[:, :3] = np.array(pal[:768], np.uint8).reshape(256, 3)
+    lut[:, 3] = 255
+    t = img.info.get("transparency")
+    if isinstance(t, int):
+        lut[t] = 0
+    return lut[np.asarray(img)]
+
+
+def decoded_rgba(path: Path) -> list[np.ndarray]:
+    with GifSource.open(path) as src:
+        out = []
+        for i in range(src.meta.frame_count):
+            a = np.array(src.frame(i))
+            a[a[..., 3] == 0] = 0
+            out.append(a)
+        return out
+
+
+def assert_lossless(path: Path, frames) -> None:
+    got = decoded_rgba(path)
+    assert len(got) == len(frames)
+    for k, ((img, _), g) in enumerate(zip(frames, got, strict=True)):
+        exp = expected_rgba(img)
+        bad = np.argwhere((exp != g).any(axis=2))
+        assert bad.size == 0, f"frame {k}: {len(bad)} pixels differ, first at {bad[0]}"
 
 
 def leftovers(directory: Path) -> list[str]:
@@ -171,7 +213,10 @@ def test_transparency_round_trip_first_frame(tmp_path: Path) -> None:
     assert f1.getpixel((0, 0)) == (0, 255, 0, 255)
     assert f2.getpixel((15, 5))[3] == 0  # not the previous green
     assert f2.getpixel((5, 5)) == (0, 0, 255, 255)
-    assert [f["disposal"] for f in gif_frames(out)] == [2, 2, 2]
+    # Only a frame followed by an opaque->transparent change is cleared (disposal 2);
+    # the last one too because frame 0 (shown next when looping) is transparent.
+    assert [f["disposal"] for f in gif_frames(out)] == [1, 2, 2]
+    assert_lossless(out, frames)
 
 
 def test_transparency_only_in_later_frames(tmp_path: Path) -> None:
@@ -190,9 +235,12 @@ def test_transparency_only_in_later_frames(tmp_path: Path) -> None:
     assert imgs[3].getpixel((5, 5)) == (0, 0, 255, 255)
     assert imgs[4].getpixel((15, 5)) == (9, 9, 9, 255)
     info = gif_frames(out)
-    # The frame before a transparent one must restore to background.
-    assert [f["disposal"] for f in info] == [1, 1, 2, 2, 1]
+    # Only the frame before the opaque->transparent change restores to background.
+    assert [f["disposal"] for f in info] == [1, 1, 2, 1, 1]
+    assert info[2]["rect"] == (0, 0, *SIZE)  # disposal 2 must clear the whole canvas
     assert info[3]["transparency"] == 1
+    assert info[3]["rect"] == (0, 0, 10, 10)  # drawn on a blank canvas: opaque bbox only
+    assert_lossless(out, frames)
     # Frame 0 was patched with an unused index so Pillow decodes the GIF as RGBA.
     assert info[0]["transparency"] is not None
     with Image.open(out) as im:
@@ -212,8 +260,7 @@ def test_opaque_border_matching_first_transparent_colour_survives(tmp_path: Path
     f2 = Image.new("P", SIZE, 0)
     f2.putpalette([0, 0, 0])
     out = write_gif([(f0, 5), (f1, 5), (f2, 5)], tmp_path / "bar.gif")
-    info = gif_frames(out)
-    assert [f["rect"] for f in info] == [(0, 0, *SIZE)] * 3
+    assert_lossless(out, [(f0, 5), (f1, 5), (f2, 5)])
     imgs = rgba_frames(out)
     assert imgs[0].getpixel((0, 0))[3] == 0
     assert imgs[1].getpixel((0, 0)) == (0, 0, 0, 255)
@@ -392,3 +439,152 @@ def test_estimate_size_edge_cases() -> None:
     assert one > 0
     assert estimate_size(frames[:1], 10) > one
     assert estimate_size(frames, 0) == 0
+
+
+# ---------------------------------------------------------------- loop & verify
+
+
+def test_loop_none_writes_no_netscape_block(tmp_path: Path) -> None:
+    frames = [(quantized((255, 0, 0)), 5), (quantized((0, 0, 255)), 5)]
+    once = write_gif(frames, tmp_path / "once.gif", loop=None)
+    assert not has_netscape(once)
+    with Image.open(once) as im:
+        assert "loop" not in im.info
+    assert read_back(once) == (2, [50, 50])
+    forever = write_gif(frames, tmp_path / "forever.gif")
+    assert has_netscape(forever)
+
+
+def test_verify_success_runs_on_temp_before_replace(tmp_path: Path) -> None:
+    dest = tmp_path / "v.gif"
+    dest.write_bytes(b"old")
+    seen: list[tuple[Path, tuple[int, list[int]], bytes]] = []
+
+    def verify(p: Path) -> None:
+        seen.append((p, read_back(p), dest.read_bytes()))
+
+    frames = [(quantized((255, 0, 0)), 5), (quantized((0, 255, 0)), 7)]
+    out = write_gif(frames, dest, verify=verify)
+    assert len(seen) == 1
+    tmp, info, dest_then = seen[0]
+    assert tmp != dest and tmp.parent == tmp_path and tmp.name.endswith(".tmp")
+    assert info == (2, [50, 70])
+    assert dest_then == b"old"  # destination not yet replaced while verifying
+    assert read_back(out) == (2, [50, 70])
+    assert leftovers(tmp_path) == []
+
+
+def test_verify_failure_keeps_destination(tmp_path: Path) -> None:
+    dest = tmp_path / "v.gif"
+    dest.write_bytes(b"old")
+
+    def verify(p: Path) -> None:
+        assert p.exists()
+        raise RuntimeError("bad output")
+
+    with pytest.raises(RuntimeError, match="bad output"):
+        write_gif([(quantized((255, 0, 0)), 5)], dest, verify=verify)
+    assert dest.read_bytes() == b"old"
+    assert leftovers(tmp_path) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["v.gif"]
+
+
+# ---------------------------------------------------------------- differencing
+
+
+def shared_frame(idx: np.ndarray, palette: list[int], t: int | None) -> Image.Image:
+    im = Image.fromarray(idx.astype(np.uint8), "P")
+    im.putpalette(palette)
+    if t is not None and (idx == t).any():
+        im.info["transparency"] = t
+    return im
+
+
+def test_diff_frames_write_only_changed_rect(tmp_path: Path) -> None:
+    pal = [v for i in range(16) for v in (i * 16, 255 - i * 16, i * 8)]
+    base = np.tile(np.arange(16, dtype=np.uint8) % 16, (24, 3))[:, :40]  # 40x24
+    frames = []
+    for k in range(4):
+        a = base.copy()
+        a[5:9, 3 + k * 5 : 7 + k * 5] = 15 - (k % 2)
+        frames.append((shared_frame(a, pal, None), 4))
+    frames.append((frames[-1][0].copy(), 6))  # identical frame: kept, 1x1 rect
+    out = write_gif(frames, tmp_path / "d.gif")
+    info = gif_frames(out)
+    assert len(info) == 5 and [f["delay_cs"] for f in info] == [4, 4, 4, 4, 6]
+    assert info[0]["rect"] == (0, 0, 40, 24)
+    # frame 1 differs from frame 0 in x 3..11, y 5..8
+    assert info[1]["rect"] == (3, 5, 9, 4)
+    assert info[4]["rect"][2:] == (1, 1)
+    assert all(f["disposal"] == 1 for f in info)
+    # One shared palette: global colour table only.
+    assert has_global_table(out)
+    assert not any(f["local_table"] for f in info)
+    # Unchanged pixels inside a rect are marked with an index no changed pixel uses.
+    assert info[1]["transparency"] is not None
+    assert_lossless(out, frames)
+    for (src, _), got in zip(frames, rgba_frames(out), strict=True):
+        assert got.convert("RGB").tobytes() == src.convert("RGB").tobytes()
+
+
+def test_differing_palettes_keep_local_tables(tmp_path: Path) -> None:
+    frames = [(quantized(c), 5) for c in [(255, 0, 0), (0, 255, 0), (0, 255, 0)]]
+    frames[2] = (pframe((0, 255, 0)), 5)  # same colour, different palette
+    out = write_gif(frames, tmp_path / "loc.gif")
+    info = gif_frames(out)
+    assert info[0]["local_table"] is False  # first palette is the global table
+    assert info[1]["local_table"] is True
+    assert_lossless(out, frames)
+    # Frame 2 decodes identically to frame 1 -> nothing changed -> 1x1 rect.
+    assert info[2]["rect"][2:] == (1, 1)
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize("loop", [0, None])
+def test_random_animation_lossless(tmp_path: Path, seed: int, shared: bool, loop) -> None:
+    """Random moving blobs with appearing/disappearing transparency round-trip exactly."""
+    rng = np.random.default_rng(seed)
+    w, h, n = 23, 17, 12
+    n_col = int(rng.choice([3, 16, 255]))
+    t = n_col  # reserved transparent index (shared mode)
+    pal = rng.integers(0, 256, 3 * (n_col + 1)).tolist()
+    canvas = rng.integers(0, n_col, (h, w))
+    frames = []
+    for _ in range(n):
+        canvas = canvas.copy()
+        for _ in range(int(rng.integers(0, 4))):
+            x, y = int(rng.integers(0, w)), int(rng.integers(0, h))
+            bw, bh = int(rng.integers(1, 8)), int(rng.integers(1, 6))
+            fill = t if rng.random() < 0.3 else int(rng.integers(0, n_col))
+            canvas[y : y + bh, x : x + bw] = fill
+        if shared:
+            frames.append((shared_frame(canvas, pal, t), int(rng.integers(2, 9))))
+        else:
+            # Per-frame permuted palette: same colours, different indices.
+            perm = rng.permutation(n_col)
+            idx = np.where(canvas == t, t, perm[np.minimum(canvas, n_col - 1)])
+            p = np.array(pal[: 3 * n_col]).reshape(-1, 3)
+            new_pal = np.zeros((n_col + 1, 3), int)
+            new_pal[perm] = p
+            frames.append((shared_frame(idx, new_pal.ravel().tolist(), t), int(rng.integers(2, 9))))
+    out = write_gif(frames, tmp_path / "r.gif", loop=loop)
+    assert read_back(out) == (n, [d * 10 for _, d in frames])
+    assert_lossless(out, frames)
+    if shared:
+        assert not any(f["local_table"] for f in gif_frames(out))
+
+
+def test_full_palette_partial_change_lossless(tmp_path: Path) -> None:
+    """All 256 indices used: no free marker index frame-wide, still exact."""
+    frames = noisy_frames(1, size=(32, 32))
+    im0 = frames[0][0]
+    a = np.array(im0)
+    a[4:20, 4:20] = np.arange(256, dtype=np.uint8).reshape(16, 16)[::-1]
+    im1 = Image.fromarray(a, "P")
+    im1.putpalette(im0.getpalette())
+    frames.append((im1, 4))
+    out = write_gif(frames, tmp_path / "full.gif")
+    info = gif_frames(out)
+    assert info[1]["rect"] == (4, 4, 16, 16)
+    assert_lossless(out, frames)

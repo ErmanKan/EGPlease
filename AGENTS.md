@@ -50,6 +50,14 @@ GifLoadError(Exception)
 GifSource.open(path, limits=Limits()) -> GifSource; .meta; .warnings; .frame(i) -> RGBA Image (a copy)
           .thumbnail(i, max_side=96) -> RGBA Image; .close(); context manager; thread-safe
 
+# core/pipeline.py
+plan(meta, state) -> TimelinePlan; summarize(meta, state) -> Summary
+output_palette(source, state, timeline) -> Palette        # from <=16 evenly spaced output frames
+iter_output_frames(source, state, timeline, palette=None) -> Iterator[(P Image, delay_cs)]
+generate(source, state, out_path, *, progress=None, cancel=None) -> GenerateResult
+    # keeps source loop (None stays None); verifies frame count + durations before replace
+export_frame_png(source, index, out_path, state=None) -> Path
+
 # core/timeline.py
 OutputFrame(src_index, delay_cs); TimelinePlan(frames, duration_ms, warnings)
 plan_output(delays_ms: Sequence[int], state: EditState) -> TimelinePlan
@@ -58,11 +66,19 @@ frame_at_time(delays_ms, t_ms) -> int ; start_times_ms(delays_ms) -> list[int]
 # core/render.py
 output_dimensions(canvas_w, canvas_h, crop, size) -> (w, h)
 render_frame(img_rgba, crop, size) -> RGBA Image          # crop then LANCZOS resize (premultiplied alpha)
-quantize(img_rgba, quality) -> "P" Image                   # info["transparency"] set iff any transparent pixel
+Palette(colors: tuple[RGB, ...], transparent=False); .transparent_index (= len(colors) or None); .size; .flat()
+sample_indices(count, max_samples=16) -> list[int]         # evenly spaced, first+last kept
+build_palette(sample_rgba_frames, quality, *, transparent=False) -> Palette   # shared palette (median cut / exact)
+quantize(img_rgba, quality, palette=None, previous=None) -> "P" Image
+    # info["transparency"] set iff any transparent pixel; palette given -> mapped onto it (same
+    # indices every frame); previous=(prev_rgba, prev_p) keeps indices of unchanged pixels (no shimmer)
 
 # core/encoder.py
 Cancelled(Exception)
-write_gif(frames: Iterable[tuple[Image, int]], path, *, loop=0, total=None, progress=None, cancel=None) -> Path
+write_gif(frames: Iterable[tuple[Image, int]], path, *, loop: int | None = 0, total=None, progress=None,
+          cancel=None, verify: Callable[[Path], None] | None = None) -> Path
+    # lossless diff frames (changed rect, unchanged pixels transparent); 1st palette = global table;
+    # loop=None -> no NETSCAPE block (plays once); verify(temp) runs before os.replace
 read_back(path) -> tuple[int, list[int]]                   # (frame_count, durations_ms)
 estimate_size(sample_frames, total_frames) -> int
 ```

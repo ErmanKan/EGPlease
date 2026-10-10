@@ -10,10 +10,10 @@ header (a corrupt file).  It also merges identical consecutive frames and has
 to collect every frame in memory before writing.
 
 So this module writes the GIF container itself and uses Pillow only for the
-LZW-compressed image data of each frame (``GifImagePlugin.getdata``).  Every
-frame is written full-canvas with its own colour table and its own
-transparency index, nothing is merged, and frames are streamed to disk as they
-are produced (constant memory).
+LZW-compressed image data of each frame (``GifImagePlugin.getdata``).  Frames
+are written as exact difference rectangles against the previous frame's decoded
+colours (lossless by construction), nothing is merged, and frames are streamed
+to disk with a one-frame look-ahead (constant memory).
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
+import numpy as np
 from PIL import GifImagePlugin, Image
 
 __all__ = ["Cancelled", "estimate_size", "read_back", "write_gif"]
@@ -79,130 +80,200 @@ def _check_frame(item: object, size: tuple[int, int] | None, index: int) -> Fram
     return img, delay_cs
 
 
-def _prepare(img: Image.Image, dummy: bool) -> tuple[Image.Image, int | None]:
-    """Copy `img` with a plain RGB palette covering every used index.
-
-    Returns the copy and the transparency index to write: the frame's own
-    index, or - when `dummy` is true and the frame is opaque - an index that no
-    pixel uses (None if all 256 are used).  A dummy index changes nothing
-    visually but makes Pillow-based readers dispose to transparent instead of
-    to an opaque background colour.
-    """
-    out = img.copy()
-    pal = img.getpalette("RGB") or []
-    used = {i for i, n in enumerate(out.histogram()) if n}
-    t = _transparency_index(img)
-    if t is None and dummy:
-        n_entries = max(len(pal) // 3, 1)
-        free = [i for i in range(256) if i not in used]
-        if free:
-            in_table = [i for i in free if i < n_entries]
-            t = in_table[0] if in_table else free[0]
-    needed = max(max(used, default=0) + 1, 2, (t + 1) if t is not None else 0)
-    if len(pal) < needed * 3:
-        pal = pal + [0] * (needed * 3 - len(pal))
-    out.putpalette(pal, "RGB")
-    return out, t
+def _canonical_palette(img: Image.Image) -> bytes:
+    """The image's RGB palette as exactly 768 bytes (zero padded / truncated)."""
+    pal = bytes(img.getpalette("RGB") or [])[:768]
+    return pal + bytes(768 - len(pal))
 
 
-def _write_header(fp: BinaryIO, size: tuple[int, int], loop: int) -> None:
+def _table_entries(n: int) -> int:
+    """Smallest GIF colour-table size (power of two, 2..256) holding ``n`` entries."""
+    size = 2
+    while size < n:
+        size *= 2
+    return size
+
+
+def _table_flag_bits(entries: int) -> int:
+    return entries.bit_length() - 2  # 2 -> 0, 4 -> 1, ..., 256 -> 7
+
+
+def _palette_len(img: Image.Image) -> int:
+    return max(len(img.getpalette("RGB") or []) // 3, 1)
+
+
+class _Record:
+    """One input frame, decoded to packed RGBA (transparent = 0) for exact diffs."""
+
+    __slots__ = ("delay_cs", "idx", "need", "own_t", "palette", "rgba")
+
+    def __init__(self, img: Image.Image, delay_cs: int) -> None:
+        self.delay_cs = delay_cs
+        self.idx = np.asarray(img, dtype=np.uint8)
+        self.palette = _canonical_palette(img)
+        self.own_t = _transparency_index(img)
+        # Colour-table entries this frame needs: its palette, every used index, its t.
+        self.need = max(
+            _palette_len(img),
+            int(self.idx.max()) + 1 if self.idx.size else 1,
+            (self.own_t + 1) if self.own_t is not None else 0,
+        )
+        rgb = np.frombuffer(self.palette, np.uint8).reshape(256, 3).astype(np.uint32)
+        lut = rgb[:, 0] | rgb[:, 1] << 8 | rgb[:, 2] << 16 | np.uint32(0xFF000000)
+        if self.own_t is not None:
+            lut[self.own_t] = 0
+        self.rgba = lut[self.idx]
+
+    @property
+    def has_transparency(self) -> bool:
+        return self.own_t is not None and bool((self.idx == self.own_t).any())
+
+
+def _bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    """(x0, y0, x1, y1) of the true pixels of a 2-D mask, or None."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(mask.any(axis=0))
+    return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
+
+
+def _write_header(
+    fp: BinaryIO, size: tuple[int, int], loop: int | None, global_table: bytes
+) -> None:
     w, h = size
-    # Logical screen descriptor without a global colour table: every frame has a local one.
-    fp.write(b"GIF89a" + struct.pack("<HHBBB", w, h, 0, 0, 0))
-    fp.write(b"!\xff\x0bNETSCAPE2.0\x03\x01" + struct.pack("<H", loop) + b"\x00")
+    entries = len(global_table) // 3
+    flags = 0x80 | 0x70 | _table_flag_bits(entries)  # global table, 8-bit colour resolution
+    fp.write(b"GIF89a" + struct.pack("<HHBBB", w, h, flags, 0, 0) + global_table)
+    if loop is not None:
+        fp.write(b"!\xff\x0bNETSCAPE2.0\x03\x01" + struct.pack("<H", loop) + b"\x00")
 
 
 def _write_frame(
-    fp: BinaryIO, im: Image.Image, delay_cs: int, disposal: int, transparency: int | None
-) -> int:
-    """Write one full-canvas frame; return the file offset of its control extension."""
+    fp: BinaryIO,
+    im: Image.Image,
+    offset: tuple[int, int],
+    delay_cs: int,
+    disposal: int,
+    transparency: int | None,
+    local_table: bool,
+) -> None:
     params: dict[str, object] = {
         "duration": delay_cs * 10,
         "disposal": disposal,
-        "include_color_table": True,
+        "include_color_table": local_table,
     }
     if transparency is not None:
         params["transparency"] = transparency
-    gce_offset = fp.tell()
-    chunks = GifImagePlugin.getdata(im, (0, 0), **params)
+    chunks = GifImagePlugin.getdata(im, offset, **params)
     if not chunks or not bytes(chunks[0]).startswith(b"!\xf9\x04"):
         raise RuntimeError("unexpected GIF frame layout from Pillow")
     for chunk in chunks:
         fp.write(chunk)
-    return gce_offset
 
 
 class _Writer:
-    """Streams full-canvas frames to a seekable `fp` with a one-frame look-ahead.
+    """Streams frames to `fp` as *difference* frames with a one-frame look-ahead.
 
-    Disposal: a frame gets 2 (restore to background) when it or the frame drawn
-    after it is transparent, so transparent pixels never show stale content;
-    otherwise 1 (do not dispose).  With no transparency at all every frame is 1.
+    The canvas a viewer shows after frame k-1 (with disposal 1, "do not dispose") is
+    exactly frame k-1's image, so frame k only writes the bounding rectangle of the
+    pixels whose decoded RGBA differs from frame k-1; inside that rectangle unchanged
+    pixels are set to a transparency index ("keep what is there"), which compresses
+    well.  Comparisons are on decoded colours, so the output is lossless whatever the
+    frames' palettes are.
 
-    Pillow's reader only produces RGBA frames when frame 0 declares a
-    transparency index, and fills disposal-2 areas with an opaque background
-    colour unless the disposed frame declares one.  So opaque frames followed
-    by a transparent one get an unused "dummy" transparency index, and if a
-    later frame turns out to be transparent the first frame's control extension
-    is patched in place with a dummy index reserved for that purpose.
+    A diff over a kept canvas cannot turn an opaque pixel transparent.  When frame k
+    does that, frame k-1 is written full-canvas with disposal 2 (cleared to
+    transparent afterwards) and frame k is written against a blank canvas.  When
+    looping and frame 0 has transparent pixels, the last frame is handled the same
+    way so the restart starts from a clear canvas.
+
+    The first frame's palette becomes the global colour table; frames with the same
+    palette omit their local table (always the case with a shared palette), others
+    carry their own.  Every frame declares a transparency index whenever a usable one
+    exists: Pillow's reader only produces RGBA frames when frame 0 declares one and
+    fills disposal-2 areas with an opaque colour unless the disposed frame does.
     """
 
-    def __init__(self, fp: BinaryIO, loop: int) -> None:
+    def __init__(self, fp: BinaryIO, loop: int | None) -> None:
         self.fp = fp
         self.loop = loop
-        self.pending: Frame | None = None
-        self.count = 0
+        self.size: tuple[int, int] | None = None
+        self.global_palette = b""
+        self.first_palette = b""
+        self.global_entries = 0
+        self.pending: _Record | None = None
+        self.base: np.ndarray | None = None  # canvas under `pending`; None = blank
         self.first_transparent = False
-        self.first_gce: int | None = None
-        self.first_dummy: int | None = None
-        self.first_declares = False
+        self.count = 0
 
     def add(self, img: Image.Image, delay_cs: int) -> None:
-        transparent = _transparency_index(img) is not None
+        rec = _Record(img, delay_cs)
         if self.count == 0:
-            _write_header(self.fp, img.size, self.loop)
-            self.first_transparent = transparent
+            self.size = img.size
+            self.global_entries = _table_entries(rec.need)
+            self.first_palette = rec.palette
+            self.global_palette = rec.palette[: 3 * self.global_entries]
+            _write_header(self.fp, img.size, self.loop, self.global_palette)
+            self.first_transparent = rec.has_transparency
         else:
-            self._flush(next_transparent=transparent)
-            if transparent and not self.first_declares:
-                self._patch_first()
-        self.pending = (img, delay_cs)
+            assert self.pending is not None
+            restore = bool(((self.pending.rgba != 0) & (rec.rgba == 0)).any())
+            self._flush(restore=restore)
+        self.pending = rec
         self.count += 1
-
-    def _flush(self, *, next_transparent: bool) -> None:
-        assert self.pending is not None
-        img, delay_cs = self.pending
-        transparent = _transparency_index(img) is not None
-        disposal = 2 if transparent or next_transparent else 1
-        is_first = self.first_gce is None
-        im, t = _prepare(img, dummy=disposal == 2 or is_first)
-        if is_first and not transparent and disposal != 2:
-            # Reserve the dummy index but only declare it if a transparent frame follows.
-            self.first_dummy, t = t, None
-        offset = _write_frame(self.fp, im, delay_cs, disposal, t)
-        if is_first:
-            self.first_gce = offset
-            self.first_declares = t is not None
-        self.pending = None
-
-    def _patch_first(self) -> None:
-        if self.first_gce is None or self.first_dummy is None:
-            return
-        end = self.fp.tell()
-        self.fp.seek(self.first_gce + 3)
-        packed = self.fp.read(1)[0]
-        self.fp.seek(self.first_gce + 3)
-        self.fp.write(bytes([packed | 1]))
-        self.fp.seek(self.first_gce + 6)
-        self.fp.write(bytes([self.first_dummy]))
-        self.fp.seek(end)
-        self.first_declares = True
 
     def finish(self) -> None:
         if self.pending is not None:
             # When looping, the frame after the last one is the first one.
-            self._flush(next_transparent=self.first_transparent)
+            self._flush(restore=self.loop is not None and self.first_transparent)
         self.fp.write(b";")
+
+    def _flush(self, *, restore: bool) -> None:
+        rec = self.pending
+        assert rec is not None and self.size is not None
+        w, h = self.size
+        first = self.base is None and self.count == 1
+        canvas_rgba = self.base if self.base is not None else np.zeros_like(rec.rgba)
+        changed = rec.rgba != canvas_rgba
+        full = (0, 0, w, h)
+        x0, y0, x1, y1 = full if restore or first else (_bbox(changed) or (0, 0, 1, 1))
+        idx = rec.idx[y0:y1, x0:x1]
+        ch = changed[y0:y1, x0:x1]
+
+        shared = rec.need <= self.global_entries and rec.palette == self.first_palette
+        entries = self.global_entries if shared else _table_entries(rec.need)
+        mark = self._marker(rec, idx, ch, entries)
+        if mark is None and not shared:
+            # A larger local table may provide an unused index.
+            bigger = _table_entries(entries + 1) if entries < 256 else entries
+            mark = self._marker(rec, idx, ch, bigger)
+            if mark is not None:
+                entries = bigger
+        out = np.where(ch, idx, mark).astype(np.uint8) if mark is not None else idx
+        im = Image.fromarray(np.ascontiguousarray(out), "P")
+        im.putpalette(rec.palette[: 3 * entries], "RGB")
+        disposal = 2 if restore else 1
+        _write_frame(self.fp, im, (x0, y0), rec.delay_cs, disposal, mark, not shared)
+        self.base = None if restore else rec.rgba
+        self.pending = None
+
+    @staticmethod
+    def _marker(rec: _Record, idx: np.ndarray, ch: np.ndarray, entries: int) -> int | None:
+        """Index to declare transparent: never used by a changed pixel inside the rect.
+
+        The frame's own transparency index qualifies (a changed pixel is never
+        transparent: that case is written against a blank canvas, where transparent
+        pixels are unchanged).  Otherwise prefer an index outside the frame's palette.
+        """
+        if rec.own_t is not None:
+            return rec.own_t  # always < entries (rec.need covers it)
+        used = np.zeros(256, bool)
+        used[np.unique(idx[ch])] = True
+        for i in range(entries - 1, -1, -1):
+            if not used[i]:
+                return i
+        return None
 
 
 def _iter_checked(frames: Iterable[object]) -> Iterator[Frame]:
@@ -220,17 +291,25 @@ def write_gif(
     frames: Iterable[Frame],
     path: str | os.PathLike[str],
     *,
-    loop: int = 0,
+    loop: int | None = 0,
     total: int | None = None,
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
+    verify: Callable[[Path], None] | None = None,
 ) -> Path:
     """Write an animated GIF atomically and return its final path.
 
     `frames` yields ``("P"-mode image, delay_cs)`` pairs; all images must have
     the same size and every delay must be an int >= 2 centiseconds.  A frame is
     transparent iff its ``info["transparency"]`` is set; that index is written
-    per frame.  `loop` is the NETSCAPE loop count (0 = forever).
+    per frame.  `loop` is the NETSCAPE loop count (0 = forever); ``None`` writes no
+    loop extension at all (the GIF plays once, like a source without one).
+
+    Frames are written as difference frames (see `_Writer`): only the rectangle that
+    changed since the previous frame, with unchanged pixels inside it marked
+    transparent.  Decoding the output yields exactly the input frames.  The first
+    frame's palette is the global colour table and frames sharing it carry no local
+    table (pass frames quantized onto one `render.Palette` for the smallest files).
 
     The iterable is consumed lazily and each frame is encoded and streamed to
     disk immediately, so memory use does not grow with the frame count (this
@@ -242,16 +321,22 @@ def write_gif(
     `cancel.is_set()` is checked before each frame and before the file is
     committed; if set, `Cancelled` is raised.
 
+    `verify(temp_path)`, if given, runs on the complete temporary file just before
+    it is moved into place; any exception it raises aborts the write (the temporary
+    file is deleted, the destination untouched) and propagates.
+
     The data is written to a hidden temporary file in the destination
     directory and moved into place with `os.replace`.  On cancellation or any
     error the temporary file is removed and the exception re-raised; an
     existing destination file is left untouched.
 
     Raises ValueError for an empty sequence, a non-"P" image, a delay outside
-    2..65535 cs, mismatched frame sizes, or a loop outside 0..65535.
+    2..65535 cs, mismatched frame sizes, or a loop that is not None or 0..65535.
     """
-    if isinstance(loop, bool) or not isinstance(loop, int) or not 0 <= loop <= MAX_LOOP:
-        raise ValueError(f"loop must be an int in 0..{MAX_LOOP}, got {loop!r}")
+    if loop is not None and (
+        isinstance(loop, bool) or not isinstance(loop, int) or not 0 <= loop <= MAX_LOOP
+    ):
+        raise ValueError(f"loop must be None or an int in 0..{MAX_LOOP}, got {loop!r}")
     dest = Path(path)
     tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
 
@@ -279,6 +364,9 @@ def write_gif(
             writer.finish()
             fp.flush()
             os.fsync(fp.fileno())
+        check_cancel()
+        if verify is not None:
+            verify(tmp)
         check_cancel()
         os.replace(tmp, dest)
     except BaseException:
