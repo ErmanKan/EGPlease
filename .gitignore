@@ -17,6 +17,8 @@ dist/
 .idea/
 Thumbs.db
 desktop.ini
+# Project-local Linux dev libs (scripts/fetch-devlibs.sh)
+.devlibs/
 # Scratch
 *.tmp.gif
 /out/

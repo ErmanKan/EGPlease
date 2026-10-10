@@ -13,13 +13,14 @@ Python 3.13 · PySide6-Essentials 6.12.0 · Pillow 12.3.0 · numpy 2.5.3 · pyte
 ```bash
 cd /workspace/projects/gif-editor
 .venv/bin/ruff check . && .venv/bin/ruff format --check .   # lint (use `ruff format .` to fix)
-.venv/bin/python -m pytest -q -p no:pytest-qt tests/core      # core tests (this container)
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q        # all tests (Windows/CI; needs Qt libs)
+scripts/test.sh                                              # lint + ALL tests incl. Qt UI tests (this container)
+scripts/test.sh tests/ui -k crop                             # extra args go to pytest
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q      # all tests on Windows/CI
 PYTHONPATH=src .venv/bin/python -m gif_editor               # run (needs a display)
 ```
 
 ## Environment note
-The dev container has no `libEGL.so.1`, so PySide6 cannot be imported here. Core work and tests must not import Qt; always pass `-p no:pytest-qt` in this container. Windows CI runs the full suite.
+The dev container lacks `libEGL.so.1`. `scripts/fetch-devlibs.sh` downloads Debian's `libegl1` (SHA-256 pinned, verified against the signed archive index) and unpacks it into the gitignored `.devlibs/`. Nothing is installed system-wide. `scripts/test.sh` sets `LD_LIBRARY_PATH` + `QT_QPA_PLATFORM=offscreen`, so ALWAYS run tests through it in this container (plain `pytest` without it fails to import PySide6). Workers must not fetch or add other system libraries; list them under packages_needed instead.
 
 ## Architecture rules
 - `src/gif_editor/core/` is pure Python + Pillow/numpy. **No Qt imports in core.**
