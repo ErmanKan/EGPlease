@@ -27,7 +27,7 @@ Other tests are plain method calls: `toggle()` signals, empty plan (trim start b
 - Testing `_on_timeout` directly is intentional white-box testing of the drift logic.
 
 ## Tests
-- 23 tests; run with `scripts/test.sh tests/ui/test_player.py`.
+- 22 tests; run with `scripts/test.sh tests/ui/test_player.py`.
 
 ## History
 - Milestone 2: created together with `player.py`.
