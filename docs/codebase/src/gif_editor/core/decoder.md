@@ -113,7 +113,7 @@ flowchart TD
 - `has_transparency` is "any composited pixel has alpha < 255", not "the file declares a transparency index". A file with a transparency index that never shows can be `False`; a first frame smaller than the canvas makes it `True`.
 - Decode errors that appear in `_render` (they should not happen, since `_index` already decoded every frame) are raised as `GifLoadError`.
 - `GifImagePlugin.LOADING_STRATEGY` is never touched (`test_loading_strategy_restored`).
-- The module docstring names the entry point as `Image.frombytes(mode, size, data, "gif", …)`. The code actually calls the **instance** method `Image.Image.frombytes(data, "gif", bits, interlace, -1)` on a pre-allocated `"P"` image. The selftest monkeypatches `Image.Image.frombytes` accordingly.
+- The entry point is the **instance** method `Image.Image.frombytes(data, "gif", bits, interlace, -1)` on a pre-allocated `"P"` image (not the module-level `Image.frombytes`). The selftest test monkeypatches `Image.Image.frombytes` accordingly. (Until the end of M2 the module docstring wrongly named the module-level function; corrected.)
 
 ## Tests
 - `tests/core/test_decoder.py`: metadata and effective delays, loop present/absent/count, disposal recording, colours vs Pillow on opaque full-canvas GIFs, copy semantics, index errors, thumbnails, not-a-GIF/garbage/missing file, frame and canvas limits, transparency detection, truncation, LRU correctness under a tiny budget and zero budget, 6-thread stress, file released after open, close semantics.

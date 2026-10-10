@@ -1,13 +1,14 @@
 # 03 — Architecture (the code as it is today)
 
-This page describes the code on `main` as of Milestone 2 (in progress). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
+This page describes the code on `main` as of the end of Milestone 2 (window and inspector). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
 
 ## 1. Layers
 
 ```mermaid
 flowchart TB
     subgraph UI["ui/ (PySide6, GUI thread)"]
-        W["M2 widgets (in progress)<br/>settings panel · canvas · timebar · filmstrip · transport/player"]
+        MW["MainWindow<br/>menus · shortcuts · open · Generate · Save frame"]
+        W["widgets<br/>settings panel · canvas · timebar · filmstrip · transport · player"]
         DOC[Document<br/>hub: source, EditState, undo, current frame, selection]
         CMD[SetStateCommand<br/>QUndoStack]
         WK[run_async<br/>QThreadPool]
@@ -22,7 +23,10 @@ flowchart TB
         PIPE[pipeline<br/>plan · summarize · generate · export PNG]
         ST[selftest]
     end
+    MW -->|composes, wires actions| W
+    MW -->|set_source · close · undo_stack| DOC
     W -->|calls / signals| DOC
+    MW --> WK
     DOC --> CMD
     W --> WK
     W --> QI
@@ -33,7 +37,7 @@ flowchart TB
 ```
 
 - **core** is a headless GIF engine. It has no Qt imports (an AGENTS.md rule), so it is fully unit-testable and could back a CLI. It depends only on Pillow and numpy. Pillow is used narrowly: LZW decode/encode, quantisation, resizing, and PNG writing.
-- **ui** is PySide6. Widgets talk **only** to `Document`. Long work goes through `run_async`.
+- **ui** is PySide6. Widgets talk **only** to `Document`; the main window composes them and wires menu actions to them (§9). Long work goes through `run_async`.
 
 ## 2. Directory tree
 
@@ -53,8 +57,8 @@ gif-editor/
 ├─ src/gif_editor/
 │  ├─ __init__.py                 package docstring + __version__
 │  ├─ __main__.py                 `python -m gif_editor` → app.main()
-│  ├─ app.py                      QApplication + placeholder window (MainWindow in M2)
-│  ├─ resources/icons/            (empty)
+│  ├─ app.py                      main(): QApplication, Pillow self-test, MainWindow, optional path arg
+│  ├─ resources/icons/            (empty; buttons use Qt standard icons)
 │  ├─ core/
 │  │  ├─ __init__.py              package marker ("no Qt")
 │  │  ├─ models.py                EditState, CropRect, OutputSize, Quality (immutable)
@@ -70,22 +74,22 @@ gif-editor/
 │     ├─ commands.py              SetStateCommand (old → new EditState, gesture merging)
 │     ├─ workers.py               run_async(): QThreadPool + GUI-thread callbacks
 │     ├─ qt_image.py              pil_to_qimage(), checkerboard_brush()
-│     ├─ settings_panel.py        (in progress) output settings + summary
-│     ├─ main_window.py           (planned, orchestrator)
+│     ├─ settings_panel.py        SettingsPanel: timing/size/quality, live summary, Generate button
+│     ├─ main_window.py           MainWindow: layout, actions/shortcuts, open, Generate, Save frame
 │     └─ inspector/
 │        ├─ __init__.py           package marker
-│        ├─ canvas.py             (in progress) zoomable frame view
-│        ├─ timebar.py            (in progress) playhead, ticks, trim handles
-│        ├─ filmstrip.py          (in progress) thumbnails, selection, deleted state
-│        ├─ transport.py          (in progress) play/step controls
-│        ├─ player.py             (in progress) playback timer
-│        └─ inspector.py          (planned, orchestrator) composes the right panel
+│        ├─ canvas.py             FrameCanvas: zoomable/pannable frame view, deleted overlay
+│        ├─ timebar.py            TimeBar: playhead, ticks, snapping trim handles
+│        ├─ filmstrip.py          Filmstrip: lazy thumbnails, selection, delete/restore, trim menu
+│        ├─ transport.py          TransportBar: play/step buttons, preview toggle, frame info
+│        ├─ player.py             Player: drift-free playback timer (QObject, no widget)
+│        └─ inspector.py          Inspector: composes the right panel
 └─ tests/
    ├─ conftest.py                 session corpus fixtures (no Qt)
    ├─ gifgen.py                   simple GIFs via Pillow
    ├─ corpus.py                   raw GIF89a writer + reference compositor + 13 entries
    ├─ core/test_*.py              one per core module + corpus tests
-   └─ ui/conftest.py, test_*.py   pytest-qt tests (Document, workers, qt_image, smoke, widgets)
+   └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, one file per widget, main-window integration
 ```
 
 ## 3. End-to-end data flow: open → edit → preview → generate
@@ -93,7 +97,7 @@ gif-editor/
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant MW as MainWindow (planned)
+    participant MW as MainWindow
     participant WK as run_async (pool thread)
     participant D as Document (GUI)
     participant V as Widgets
@@ -152,10 +156,10 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 
 | Thread | Does | Must not |
 |---|---|---|
-| GUI thread | all widgets, `Document`, undo stack, `QPixmap` creation, painting, `summarize()` (cheap) | block more than about 16 ms: no `GifSource.open`, no `generate`, no bulk decoding |
-| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open`, `frame()`/`thumbnail()` batches, `generate`, `export_frame_png`, `estimate_size`, `pil_to_qimage` | touch widgets or `Document`, create `QPixmap` |
+| GUI thread | all widgets, `Document`, undo stack, `QPixmap` creation, painting, `summarize()` (cheap), the canvas's `source.frame(i)` (a cache hit for typical GIFs), Save frame's `export_frame_png` (one frame) | block more than about 16 ms: no `GifSource.open`, no `generate`, no bulk decoding |
+| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open` (main window), `thumbnail()` batches + `pil_to_qimage` (filmstrip), `generate` (main window) | touch widgets or `Document`, create `QPixmap` |
 
-- `run_async(fn, on_done, on_error, on_progress)` creates a `_Relay` QObject **on the calling (GUI) thread**. The worker emits its signals, and Qt queues them back to the GUI thread. Call it only from the GUI thread.
+- `run_async(fn, *, on_done, on_error, on_progress, pool=None)` creates a `_Relay` QObject **on the calling (GUI) thread**. The worker emits its signals, and Qt queues them back to the GUI thread. Call it only from the GUI thread.
 - `GifSource` is **thread-safe**: one lock per source guards decoding and the cache. `frame()` returns copies. Concurrent requests on one source are serialised, not parallel.
 - **Cancellation** is cooperative: pass a `threading.Event` to `generate(..., cancel=ev)`. The encoder checks it between frames and before committing, and raises `encoder.Cancelled`, which arrives as `on_error`.
 - Results come back in completion order. Widgets must ignore stale results (e.g. a thumbnail for a frame no longer needed, or a source that has since been closed).
@@ -182,8 +186,8 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Transparency preserved; alpha < 128 → transparent | `render.ALPHA_THRESHOLD`, `pipeline.output_palette(transparent=meta.has_transparency)`, `encoder._Writer` |
 | Loop: keep source behaviour | `pipeline.generate(loop=meta.loop)`, `encoder._write_header` |
 | Safe write (temp + rename), progress, cancel, verify | `encoder.write_gif`, `pipeline._verifier` |
-| Save current frame as PNG (original or edited) | `pipeline.export_frame_png(state=None|state)` |
-| Live summary | `pipeline.summarize` (exact); file size via `encoder.estimate_size` (not wired yet) |
+| Save current frame as PNG (original or edited) | `pipeline.export_frame_png(state=None|state)` via `MainWindow.save_frame_to` |
+| Live summary | `pipeline.summarize` (exact), shown by the settings panel; a file-size estimate (`encoder.estimate_size`) is unused until M3 |
 | Large GIFs / RAM | `decoder.Limits`, `_FrameCache` (LRU + pinned checkpoints ≤ ¼ budget) |
 | Fast backward scrubbing | keyframe checkpoints + `_resume_point` |
 | Pillow pinned, internals checked | `pyproject.toml` pins, `core/selftest.py` |
@@ -207,8 +211,11 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Cancel | `encoder.Cancelled`; temp file deleted; destination untouched | `write_gif` |
 | Any error during writing | temp file deleted, exception re-raised, destination untouched | `write_gif` |
 | Output doesn't read back as planned | `RuntimeError("written GIF failed verification…")`, destination untouched | `pipeline._verifier` |
-| Pillow internals changed | `SelfTestError` (to be shown at startup) | `core/selftest.py` |
+| Pillow internals changed | `SelfTestError` → "Startup self-test failed" dialog, exit code 1, before any window | `core/selftest.py`, `app.main` |
 | Worker exception | `on_error(message, exc)` on the GUI thread + traceback on stderr | `ui/workers.py` |
+| Open fails (any exception) | non-blocking "Open failed" box + `last_error`; the previous document stays open | `MainWindow.open_file` |
+| Generate fails / cancelled | "Generate failed" box, or a status-bar "cancelled" message; destination untouched | `MainWindow.generate_to` |
+| Edit refused by a widget (delete all, trim end before start) | `Filmstrip.errorOccurred` / `show_error`; settings panel shows it in its summary card | `filmstrip.py`, `settings_panel.py`, `main_window.py` |
 
 ## 8. Extension points: adding a new edit type end to end
 
@@ -227,23 +234,75 @@ Example: a hypothetical *Reverse* toggle (play frames backwards). The same steps
    - UI: a pytest-qt test that the control calls `apply`, and that undo restores it.
 6. **Docs:** update the module page(s), this page's table in §6 if it is a plan decision, the AGENTS.md interface block (orchestrator), and the INDEX line if a file was added.
 
-## 9. M2 widgets (in progress)
+## 9. M2 UI structure
 
-These are being written in parallel by worker agents. Each owner writes its own page; the orchestrator will finalise this section. AGENTS.md's *UI interfaces* block defines only the `Document`/`commands`/`workers`/`qt_image` contract and the shared widget rules, not per-widget APIs. The roles below come from those rules and from `docs/02-plan.md` §2 and §5.
+### Widget tree and ownership
+```mermaid
+flowchart TB
+    MW["MainWindow (QMainWindow)<br/>owns Document + Player · actions · dialogs"]
+    SP["QSplitter (horizontal)"]
+    SA["QScrollArea"]
+    SET["SettingsPanel"]
+    INS["Inspector (QVBoxLayout)"]
+    CV["FrameCanvas (stretch 1)"]
+    TR["TransportBar"]
+    TB["TimeBar"]
+    FS["Filmstrip"]
+    DOC[("Document (QObject)")]
+    PL[("Player (QObject, no widget)")]
+    MW --> SP
+    SP --> SA --> SET
+    SP --> INS
+    INS --> CV & TR & TB & FS
+    MW -. owns .-> DOC
+    MW -. owns .-> PL
+    TR -. drives .-> PL
+```
+- `MainWindow` creates the one `Document` and the one `Player`, then the `SettingsPanel` (inside a `QScrollArea`, so it scrolls instead of being squashed) and the `Inspector`, which builds its four children with the same `doc` (and gives the transport the `player`).
+- The `Player` is not a widget. The window owns it because two things drive it: the transport buttons and the window's keyboard actions.
+- The window is the only code that reaches into widgets, and only to **wire** them: actions call widget methods (`filmstrip.delete_selected`, `canvas.zoom_fit`, `player.step`), and four outward signals come back (`SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred`, `FrameCanvas.zoomChanged`). Widgets never call each other. Details: [main_window page](codebase/src/gif_editor/ui/main_window.md).
 
-| Widget | File | Planned role | Talks to `Document` via |
-|---|---|---|---|
-| Settings panel | `ui/settings_panel.py` | Left panel: Speed, Output FPS, Start/Duration, Size (aspect lock / scale %), Quality preset + colours/dither; live summary line and warnings; the Generate button (per its module docstring) | `apply(state.with_(...), text, merge_key)`, `set_trim`; reads `summary()`; listens to `stateChanged`, `sourceChanged` |
-| Frame canvas | `ui/inspector/canvas.py` | Zoomable view of the current frame (Fit / 100 %) on a checkerboard; crop rectangle in M3 | listens to `currentIndexChanged`, `sourceChanged`; reads `source.frame(i)` via `run_async`; M3: `apply(crop=…)` |
-| Timebar | `ui/inspector/timebar.py` | Playhead, frame ticks, green/red trim handles in source time | `set_current_index`, `set_trim(..., merge_key="trim")`; uses `frame_start_ms` / `timeline.frame_at_time` |
-| Filmstrip | `ui/inspector/filmstrip.py` | Thumbnail strip; multi-select; deleted frames greyed out, restorable | `set_selection`, `set_current_index`, `delete_frames`, `restore_frames`; `source.thumbnail(i)` via `run_async` |
-| Transport | `ui/inspector/transport.py` | Play/pause, step back/forward, first/last, with shortcuts | drives the player and `set_current_index` |
-| Player | `ui/inspector/player.py` | Timer that advances `current_index` using frame delays (source or edited timing) | `set_current_index`; reads `meta.delays_ms` / `plan()` |
-| Inspector | `ui/inspector/inspector.py` | (planned, orchestrator) lays out canvas + timebar + filmstrip + transport | composition only |
-| Main window | `ui/main_window.py` | (planned, orchestrator) menus, open (async), drag-and-drop, undo/redo actions, Generate with progress/cancel, Save frame | `set_source`, `undo_stack`, `run_async(generate…)` |
+### How signals flow through `Document`
+```mermaid
+flowchart LR
+    subgraph writers["Widgets write (method calls)"]
+        SETw["SettingsPanel<br/>apply · set_trim"]
+        TBw["TimeBar<br/>set_current_index · set_trim"]
+        FSw["Filmstrip<br/>set_current_index · set_selection<br/>delete/restore_frames · set_trim"]
+        PLw["Player<br/>set_current_index"]
+        MWw["MainWindow<br/>set_source · close · set_trim · undo/redo"]
+    end
+    D(("Document"))
+    subgraph readers["Widgets react (signals)"]
+        R1["sourceChanged → everyone refreshes fully"]
+        R2["stateChanged → SettingsPanel, TimeBar, Filmstrip,<br/>FrameCanvas (overlay), TransportBar (label), Player (resync)"]
+        R3["currentIndexChanged → FrameCanvas, TimeBar,<br/>Filmstrip, TransportBar, Player"]
+        R4["selectionChanged → Filmstrip"]
+    end
+    writers --> D --> readers
+```
+Example: the user clicks a thumbnail while playing.
+1. `Filmstrip` → `doc.set_current_index(5)` (guarded by `_syncing` so its own echo is ignored).
+2. `Document` emits `currentIndexChanged(5)`.
+3. `FrameCanvas` shows frame 5; `TimeBar` moves the playhead; `TransportBar` updates "Frame 6 / N"; `Player` sees an index change it did not cause and **resumes playback from frame 5** with a fresh timing base.
+4. The filmstrip's own `_on_doc_current` moves the current item with `NoUpdate`, so the **selection is not changed** by the playhead.
+
+Edits go the same way: `doc.apply(...)` → `SetStateCommand` → `stateChanged(new)`, and every view redraws from `doc.state`. Undo/redo emit the same signal, so controls, timebar handles and filmstrip marks all follow undo without extra code. To avoid feedback loops, a widget that both writes and listens either blocks its own signals while refreshing (settings panel) or uses a re-entrancy guard (filmstrip `_syncing`, player `_setting_index`).
+
+### Per-widget roles
+| Widget | File | Listens to | Calls on `Document` | Notes |
+|---|---|---|---|---|
+| Settings panel | `ui/settings_panel.py` | `sourceChanged`, `stateChanged` | `apply(..., merge_key=<per control>)`, `set_trim(..., "trim")`, `summary()` | Live summary + warnings; Generate button disabled when the output is empty. A size equal to the base size is stored as `None` ("follow the crop"). |
+| Frame canvas | `ui/inspector/canvas.py` | `sourceChanged`, `currentIndexChanged`, `stateChanged` | none (read-only) | Scene coordinates = image pixels (ready for the M3 crop rectangle). Ctrl+wheel zoom, middle-drag pan. |
+| Transport | `ui/inspector/transport.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`; `Player.playingChanged`/`previewEditsChanged` | none (drives the `Player`) | Shortcuts live in the window; "Save frame…" just emits a signal. |
+| Timebar | `ui/inspector/timebar.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | `set_current_index`, `set_trim(..., "trim-drag-N")` | Handles snap to frame boundaries (earlier boundary on a tie), Alt = free; one undo step per drag. |
+| Filmstrip | `ui/inspector/filmstrip.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`, `selectionChanged` | `set_current_index`, `set_selection`, `delete_frames`, `restore_frames`, `set_trim(..., None)` | Thumbnails in batches of 32 via `run_async`, stale batches dropped by generation number. |
+| Player | `ui/inspector/player.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | `set_current_index`; reads `plan()` in preview mode | Ideal-timeline scheduling (no drift), skips late frames, rebases after a stall longer than one loop. |
+| Inspector | `ui/inspector/inspector.py` | — | — | Composition only. |
+| Main window | `ui/main_window.py` | `sourceChanged` | `set_source`, `close`, `set_trim(..., None)`, `plan()`, `undo_stack` | Async open + drag-drop, Generate with progress/cancel, Save frame, busy flags. |
 
 Shared widget rules (AGENTS.md):
-- construct with `(doc, parent=None)`;
+- construct with `(doc, parent=None)` (the transport and inspector also take the `player`);
 - refresh fully on `sourceChanged`;
 - show a disabled/empty state when `doc.is_open` is False;
 - never block the GUI thread for more than about 16 ms;
@@ -251,14 +310,17 @@ Shared widget rules (AGENTS.md):
 - `setAccessibleName` on custom widgets;
 - HiDPI-safe painting (cosmetic pens, logical pixels).
 
+### Known UI limitations (M2)
+- **Space** is the window's play/pause shortcut, so the canvas's Space+drag pan never sees the key; **middle-drag** pans.
+- Window-level arrow and Home/End shortcuts are skipped when the focused widget accepts `ShortcutOverride` for them (the settings panel's spin boxes; the filmstrip claims Delete/Backspace/Insert and handles them itself).
+- Preview plays edited **timing** only. Crop/resize preview and the crop rectangle come in M3.
+
 ## Known drift between docs and code
 
 Things noticed while writing these docs. The code is the truth.
-- `core/selftest.py` says "the app calls it at startup"; `app.py` does not yet (it is still the M1 placeholder).
-- `core/decoder.py`'s docstring names the LZW entry point as `Image.frombytes(mode, size, data, "gif", …)`; the code calls the instance method `Image.Image.frombytes(data, "gif", bits, interlace, -1)`.
-- `scripts/fetch-devlibs.sh`'s header lists the full Debian trust chain, but the script only enforces the pinned SHA-256 (the rest was a one-time manual check).
-- AGENTS.md's `run_async` signature omits the `pool=` keyword; AGENTS.md's pipeline block omits `render_output_frame`, `Summary` and `GenerateResult`.
-- AGENTS.md's *UI interfaces* block has no per-widget interfaces for the M2 widgets.
-- `docs/02-plan.md` sketches `OutputSize(width, height, keep_aspect)`, `write_gif(..., (P-image, delay_ms))`, a `summary()` in timeline, `crop_item.py`, and one command class per edit. The code has no `keep_aspect`, uses `delay_cs`, puts `summarize` in `pipeline.py`, uses one generic `SetStateCommand`, and has `player.py`/`inspector.py`, which are not in the plan's tree.
-- `README.md` still says "Status: Milestone 1" and lists only docs 00-02.
-- `encoder.estimate_size` exists but nothing calls it yet (the summary shows no size estimate).
+- `scripts/fetch-devlibs.sh`'s header comment lists the full Debian trust chain as if the script checked it; the script enforces only the pinned SHA-256. The docs ([fetch-devlibs page](codebase/scripts/fetch-devlibs.md#trust-chain), AGENTS.md, [06-testing](06-testing.md#headless-qt-and-the-project-local-libegl)) say what is actually checked and record the one-time manual verification. The script comment itself is code and was left as is.
+- `docs/02-plan.md` is the original plan and is not rewritten; where the code deviates, see its [Implementation notes (deviations)](02-plan.md#implementation-notes-deviations).
+- `encoder.estimate_size` exists and is tested, but nothing calls it until M3 (the summary shows no size estimate yet).
+- `Document.set_trim` defaults to `merge_key="trim"`. That is intended for spinbox scrubbing (the settings panel); drag and menu callers pass their own key (`"trim-drag-N"`) or `None`. Calling it without a key from a new discrete action would silently merge with the previous trim step.
+
+Fixed at the end of M2 (kept here for reference): `app.py` now calls `run_selftest`; `Document.close()` now emits `currentIndexChanged`/`selectionChanged`; the decoder docstring now names the instance method `Image.Image.frombytes`; AGENTS.md now lists `run_async(pool=)`, the full pipeline API and the per-widget interfaces; README.md shows the M2 status.

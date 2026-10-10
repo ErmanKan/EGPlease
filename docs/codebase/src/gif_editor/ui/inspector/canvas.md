@@ -131,7 +131,7 @@ crop = CropItem(doc, parent=canvas.image_item)  # a QGraphicsItem subclass
 - QPixmaps are created only here on the GUI thread. A future async fetch must hand back a QImage or Pillow image and convert it in the `on_done` callback.
 - `zoom_fit()` is a no-op (apart from setting `fit_mode`) while the viewport has no usable size. The first real `resizeEvent` then performs the fit.
 - `zoomChanged` reports the *clamped* value.
-- **Space conflict:** if the main window binds Space to play/pause with a window-wide `QShortcut`/`QAction`, the shortcut wins over `keyPressEvent`, and Space+drag only works when no such shortcut matches. Middle-drag always works. (Raised with the orchestrator.)
+- **Space conflict (known limitation):** the main window binds Space to play/pause with a window-wide `QAction`. Window shortcuts are matched before the focused widget's `keyPressEvent`, so inside the app Space toggles playback and **Space+drag does not pan**; use **middle-drag**, which always works. Space+drag still works when the canvas is used on its own (as in `test_canvas.py`). See [main_window](../main_window.md#invariants--gotchas).
 - `Window.darker(150)` follows the Fusion palette, so a dark palette gives a darker surround automatically.
 
 ## Tests

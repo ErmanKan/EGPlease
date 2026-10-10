@@ -4,7 +4,7 @@
 
 ## Where it sits
 - **Layer:** ui (Qt: `QObject`, `QRunnable`, `QThreadPool`, `Signal`)
-- **Used by:** M2 widgets and the planned `MainWindow` (opening files, thumbnails, Generate); `tests/ui/test_workers.py`.
+- **Used by:** `ui/main_window.py` (opening files, Generate with progress), `ui/inspector/filmstrip.py` (thumbnail batches); `tests/ui/test_workers.py`.
 - **Uses:** nothing in the project.
 
 ## Public API

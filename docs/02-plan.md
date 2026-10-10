@@ -221,3 +221,24 @@ Interfaces are fixed in advance (in `AGENTS.md`) so the tasks can run in paralle
 - **Effort:** M1 about 2–3 dev-days; M2 about 3–4; M3 about 2–3; M4 about 2–3; M5 about 1–2. **Total ≈ 10–15 dev-days** of equivalent work, much of it parallelisable by subagents.
 - **Money:** $0 for the libraries and tools (all free). Optional code signing ≈ $120/year (Azure Artifact Signing) or $200–600/year (OV certificate). AI token costs depend on how much is delegated.
 - **Build size:** the installer is about 30–45 MB, and the one-dir folder about 70–120 MB unpacked (estimate).
+
+## Implementation notes (deviations)
+This plan is kept as written at Gate 1. The code deviates from it in the points below (status at the end of Milestone 2). Where they disagree, the code and [03-architecture.md](03-architecture.md) are the truth.
+
+| Plan says | Code does | Why |
+|---|---|---|
+| `OutputSize(width, height, keep_aspect)` (§7 T1) | `OutputSize(width, height)`; the aspect lock is a settings-panel control, and a size equal to the base size is stored as `size=None` | The lock is UI behaviour, not part of the output; `None` keeps the size following the crop |
+| `FrameMeta(index, delay_ms, disposal)` (T2) | adds `effective_delay_ms`; `SourceMeta` adds `delays_ms`, `has_transparency`, `loop` | The 0/10 ms → 100 ms rule needs both values |
+| `plan_output(...) -> list[OutputFrame]`, `summary()` in timeline (T3) | returns a `TimelinePlan(frames, duration_ms, warnings)`; the summary is `pipeline.summarize` → `Summary` | Warnings and duration belong to the plan; the summary also needs geometry from `render` |
+| `quantize(img, quality)`: FASTOCTREE with alpha, MEDIANCUT opaque (T4) | one **shared palette** per output (`build_palette`: exact colours if few, else median cut) and `quantize(..., palette, previous)` | A palette per frame made files ~10× larger and colours shimmer ([dev log](04-development-log.md#independent-review--fixes)) |
+| `write_gif(frames: (P-image, delay_ms), ...)` with Pillow (T5) | own GIF writer; frames are `(P-image, delay_cs)`; lossless difference frames; a `verify` hook before `os.replace`; `loop=None` keeps "play once" | Pillow's `save_all` crops opaque pixels and can write a second header mid-file with transparency ([dev log](04-development-log.md#wave-1-five-parallel-workers)); delays are already whole cs from the timeline |
+| `estimate_size(sample)`; summary "≈1.4 MB" (§2.6) | `estimate_size(sample_frames, total_frames)` exists and is tested but is **unused until M3**; the summary shows no size yet | Planned for the M3 live summary |
+| Test corpus in `tests/conftest.py` (T6) | `tests/gifgen.py` (simple GIFs via Pillow) and `tests/corpus.py` (raw GIF89a writer + reference compositor); `conftest.py` only exposes fixtures | Edge cases Pillow cannot write needed a byte-level writer |
+| `commands.py`: one `QUndoCommand` subclass per edit (§5) | one generic `SetStateCommand(old, new)` with `merge_key` gesture merging | States are immutable values, so one command covers every edit |
+| Tree: `inspector/canvas.py crop_item.py timebar.py filmstrip.py transport.py` (§5) | no `crop_item.py` yet (crop UI is M3); added `inspector/player.py` (playback engine) and `inspector/inspector.py` (panel composition); added `ui/document.py` (the hub) | Playback needed a non-visual owner shared by buttons and shortcuts |
+| No self-test in the plan | `core/selftest.py`, run by `app.main` at startup | We depend on undocumented Pillow internals |
+| Pipeline in T7 only `generate(...)` | `core/pipeline.py` also has `plan`, `summarize`, `render_output_frame`, `output_palette`, `iter_output_frames`, `export_frame_png` | One shared path for summary, preview, Generate and PNG export |
+| M2 preview toggle: timing + geometry (§2.6, M3) | M2's "Preview edits" plays the edited **timing** only; crop/resize preview comes with M3 | Geometry preview depends on the crop UI |
+| Load shows "frames, duration, W×H and size" (§2.1) | the status bar shows frames and W×H (plus decoder warnings); duration is in the timebar and summary; file size is not shown | Not needed for M2's exit criteria |
+| Undo/redo Ctrl+Z / Ctrl+Y (§2.3) | Ctrl+Z / Ctrl+Y; Ctrl+Shift+Z is not bound on Windows (see the [main window page](codebase/src/gif_editor/ui/main_window.md#actions-and-shortcuts)) | `setShortcut(StandardKey)` keeps only the first platform binding |
+| Deleted frames "greyed out" (§2.3) | filmstrip: faded thumbnail with a grey wash and a red diagonal strike; canvas: red tint + "Deleted" badge; timebar: red hatching | Readable even in greyscale; matches the plan's intent |

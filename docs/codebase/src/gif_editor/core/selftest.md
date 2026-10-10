@@ -4,7 +4,7 @@
 
 ## Where it sits
 - **Layer:** core (no Qt)
-- **Used by:** `tests/core/test_selftest.py`. Planned: the app calls `run_selftest()` at startup and shows `SelfTestError` to the user. **`app.py` does not call it yet.**
+- **Used by:** `app.py` (`main` calls `run_selftest()` before creating the window; on `SelfTestError` it shows the message and exits with code 1), `tests/core/test_selftest.py`.
 - **Uses:** `core/encoder.write_gif`, `core/decoder.GifSource` (imported lazily inside the function).
 
 ## Public API
@@ -32,7 +32,8 @@
 
 ## Tests
 - `tests/core/test_selftest.py`: speed; the exception type; broken decoder internals (`Image.Image.frombytes` patched); broken encoder internals (`GifImagePlugin.getdata` patched); wrong pixels (`decoder._decode_indices` patched); wrong delays (`encoder.write_gif` patched).
-- **Gaps:** no test of the startup integration (not implemented yet).
+- `tests/ui/test_main_window.py::test_app_main_runs_selftest_and_window` runs the real self-test through `app.main`.
+- **Gaps:** the startup failure branch (dialog + exit code 1) is not tested.
 
 ## History
 - `c0dbd20`: added after the decoder rewrite made us depend on Pillow internals ([dev log](../../../../04-development-log.md#independent-review--fixes)).

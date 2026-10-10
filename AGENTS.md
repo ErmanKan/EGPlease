@@ -16,11 +16,11 @@ cd /workspace/projects/gif-editor
 scripts/test.sh                                              # lint + ALL tests incl. Qt UI tests (this container)
 scripts/test.sh tests/ui -k crop                             # extra args go to pytest
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q      # all tests on Windows/CI
-PYTHONPATH=src .venv/bin/python -m gif_editor               # run (needs a display)
+PYTHONPATH=src .venv/bin/python -m gif_editor [file.gif]    # run (needs a display)
 ```
 
 ## Environment note
-The dev container lacks `libEGL.so.1`. `scripts/fetch-devlibs.sh` downloads Debian's `libegl1` (SHA-256 pinned, verified against the signed archive index) and unpacks it into the gitignored `.devlibs/`. Nothing is installed system-wide. `scripts/test.sh` sets `LD_LIBRARY_PATH` + `QT_QPA_PLATFORM=offscreen`, so ALWAYS run tests through it in this container (plain `pytest` without it fails to import PySide6). Workers must not fetch or add other system libraries; list them under packages_needed instead.
+The dev container lacks `libEGL.so.1`. `scripts/fetch-devlibs.sh` downloads Debian's `libegl1`, **verifies its pinned SHA-256** and unpacks it into the gitignored `.devlibs/`. The Debian signature chain was verified once, by hand, when the hash was pinned (`sqv --message` on `InRelease`, then the `Packages` hash, then the package SHA-256; commands in `docs/codebase/scripts/fetch-devlibs.md`); the script does not re-check it. Nothing is installed system-wide. `scripts/test.sh` sets `LD_LIBRARY_PATH` + `QT_QPA_PLATFORM=offscreen`, so ALWAYS run tests through it in this container (plain `pytest` without it fails to import PySide6). Workers must not fetch or add other system libraries; list them under packages_needed instead.
 
 ## Architecture rules
 - `src/gif_editor/core/` is pure Python + Pillow/numpy. **No Qt imports in core.**
@@ -52,12 +52,17 @@ GifSource.open(path, limits=Limits()) -> GifSource; .meta; .warnings; .frame(i) 
           .thumbnail(i, max_side=96) -> RGBA Image; .close(); context manager; thread-safe
 
 # core/pipeline.py
+Summary(frame_count, duration_ms, width, height, warnings)            # frozen; exact except size
+GenerateResult(path, frame_count, duration_ms, width, height, size_bytes, warnings)
 plan(meta, state) -> TimelinePlan; summarize(meta, state) -> Summary
+render_output_frame(source, src_index, state) -> RGBA Image  # crop + resize; shared with preview
 output_palette(source, state, timeline) -> Palette        # from <=16 evenly spaced output frames
 iter_output_frames(source, state, timeline, palette=None) -> Iterator[(P Image, delay_cs)]
 generate(source, state, out_path, *, progress=None, cancel=None) -> GenerateResult
-    # keeps source loop (None stays None); verifies frame count + durations before replace
-export_frame_png(source, index, out_path, state=None) -> Path
+    # progress(done, total|None); cancel: threading.Event -> encoder.Cancelled
+    # ValueError if the plan is empty; keeps source loop (None stays None);
+    # verifies frame count + durations before os.replace
+export_frame_png(source, index, out_path, state=None) -> Path   # state -> crop+resize; atomic
 
 # core/timeline.py
 OutputFrame(src_index, delay_cs); TimelinePlan(frames, duration_ms, warnings)
@@ -81,22 +86,52 @@ write_gif(frames: Iterable[tuple[Image, int]], path, *, loop: int | None = 0, to
     # lossless diff frames (changed rect, unchanged pixels transparent); 1st palette = global table;
     # loop=None -> no NETSCAPE block (plays once); verify(temp) runs before os.replace
 read_back(path) -> tuple[int, list[int]]                   # (frame_count, durations_ms)
-estimate_size(sample_frames, total_frames) -> int
+estimate_size(sample_frames, total_frames) -> int        # unused until M3 (size estimate)
 ```
 
 ## UI interfaces (contract, Milestone 2)
 ```python
-# ui/document.py  (implemented): the hub. Widgets talk ONLY to Document, never to each other.
+# ui/document.py: the hub. Widgets talk ONLY to Document, never to each other.
 Document(QObject)
   signals: sourceChanged(), stateChanged(EditState), currentIndexChanged(int), selectionChanged(frozenset)
   .source .meta .path .is_open .state .current_index .selection .undo_stack (QUndoStack)
-  .set_source(GifSource, path)  .close()
+  .set_source(GifSource, path)  .close()     # both reset and emit all four signals
   .apply(new_state, text, merge_key=None)   # ONLY way to change EditState (undoable; ValueError if invalid)
-  .delete_frames(idx) .restore_frames(idx) .set_trim(start_ms, duration_ms|None, merge_key="trim")
+  .delete_frames(idx) .restore_frames(idx) .set_trim(start_ms, duration_ms|None, *, merge_key="trim")
+      # "trim" default is for spinbox scrubbing; drags pass their own key, menus/actions pass None
   .set_current_index(i) .set_selection(idx) .plan() .summary() .frame_start_ms(i)
 # ui/commands.py  SetStateCommand(doc, old, new, text, merge_key)  # same merge_key => one undo step
-# ui/workers.py   run_async(fn, on_done=, on_error=, on_progress=)  # callbacks on GUI thread
+# ui/workers.py   run_async(fn, *, on_done=None, on_error=None, on_progress=None, pool=None)
+#     # callbacks on the GUI thread; with on_progress, fn is called as fn(progress); call from GUI thread
 # ui/qt_image.py  pil_to_qimage(img) -> QImage ; checkerboard_brush(cell=8) -> QBrush
+
+# Widgets (M2). Constructor, key public API, outward signals.
+SettingsPanel(doc, parent=None)               # ui/settings_panel.py
+  signal generateRequested()                  # Generate button (enabled only if output has frames)
+  .generate_button, .start_spin, .speed_spin, ... (public children, for tests only)
+FrameCanvas(doc, parent=None)                 # ui/inspector/canvas.py (QGraphicsView, read-only)
+  signal zoomChanged(float)
+  .zoom .fit_mode .zoom_in() .zoom_out() .zoom_actual() .zoom_fit() .set_zoom(f)
+  .image_rect() .map_to_image(view_pos)       # scene coords == image pixels
+TimeBar(doc, parent=None)                     # ui/inspector/timebar.py
+  signal scrubbed(int)                        # while dragging the playhead
+  .x_for_time(ms) .time_for_x(x) .handle_at(pos) -> "in"|"out"|None
+Filmstrip(doc, parent=None)                   # ui/inspector/filmstrip.py (QListView)
+  signal errorOccurred(str)                   # refused edit; the window shows it
+  .selected_rows() .delete_selected() .restore_selected()
+  .set_trim_start_at(row) .set_trim_end_at(row) .build_context_menu(row=None) .frame_model
+Player(doc, parent=None, *, clock=None, time_scale=1.0)   # ui/inspector/player.py (QObject)
+  signals playingChanged(bool), previewEditsChanged(bool)
+  .is_playing .preview_edits .set_preview_edits(b) .sequence()
+  .play() .pause() .toggle() .stop() .go_first() .go_last() .step(n)   # step wraps
+TransportBar(doc, player, parent=None)        # ui/inspector/transport.py
+  signal saveFrameRequested()
+  .first_button .prev_button .play_button .next_button .last_button .preview_check .info_label
+Inspector(doc, player, parent=None)           # ui/inspector/inspector.py: .canvas .transport .timebar .filmstrip
+MainWindow(doc=None, parent=None)             # ui/main_window.py: owns Document + Player
+  .open_file(path) .generate_to(path) .cancel_generate() .save_frame_to(path, with_edits=False)
+  .trim_in_here() .trim_out_here() .reset_trim() .show_error(msg) .is_busy .last_error .last_result
+  .act_* (QActions; shortcuts are window-wide)
 ```
 Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels).
 

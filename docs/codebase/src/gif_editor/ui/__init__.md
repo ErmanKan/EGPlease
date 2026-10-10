@@ -13,7 +13,7 @@
 | (none) | | Import from the submodules. |
 
 ## How it works
-An empty package. The current and planned modules:
+An empty package. Its modules (all implemented as of Milestone 2):
 
 | Module | Status | Role |
 |---|---|---|
@@ -21,9 +21,9 @@ An empty package. The current and planned modules:
 | [`commands`](commands.md) | implemented | `SetStateCommand` with gesture merging |
 | [`workers`](workers.md) | implemented | `run_async` thread-pool helper |
 | [`qt_image`](qt_image.md) | implemented | PIL → QImage, checkerboard brush |
-| `settings_panel` | in progress (M2 worker) | left panel: output settings + summary |
-| [`inspector/`](inspector/__init__.md) | in progress (M2 workers) | canvas, timebar, filmstrip, transport, player |
-| `main_window` | planned (orchestrator) | window, menus, file open, Generate |
+| [`settings_panel`](settings_panel.md) | implemented | left panel: timing, size, quality, live summary, Generate button |
+| [`inspector/`](inspector/__init__.md) | implemented | right panel: canvas, transport, timebar, filmstrip; the `Player` |
+| [`main_window`](main_window.md) | implemented | window, menus, shortcuts, file open, Generate, Save frame |
 
 ## Invariants & gotchas
 - UI code may import `core`; `core` must never import `ui`.

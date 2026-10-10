@@ -65,6 +65,8 @@ Layers, bottom to top:
 ### Keyboard
 With focus (click or Tab, since `StrongFocus` is set): Left/Right steps one frame, Shift+Left/Right steps 10 frames, Home/End jump to the first/last frame. `Document.set_current_index` clamps the result. Any other key goes to the base class, so shortcuts still bubble up.
 
+Inside the main window these keys are normally handled by the window's actions instead: `TimeBar` does not accept `ShortcutOverride`, so the window's Left/Right/Shift+Left/Right/Home/End shortcuts fire first (they call `Player.step`, which wraps at the ends, instead of clamping). The result is the same except at the first/last frame and with "Preview edits" on (then steps and Home/End stay within the kept frames). See [main_window](../main_window.md#invariants--gotchas).
+
 ### Accessibility
 The accessible name is always `"Timeline"`. The accessible description is rebuilt on every state/frame change, e.g. `"Frame 3 of 8 at 0.2 s; trim 0.1 s to 0.6 s"`, with ` (end)` added when the duration is `None`. Screen readers can therefore announce the position and trim without needing to see the painting.
 

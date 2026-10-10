@@ -4,7 +4,7 @@
 
 ## Where it sits
 - **Layer:** ui (Qt: `QImage`, `QPixmap`, `QPainter`, `QBrush`)
-- **Used by:** the M2 canvas, filmstrip and player (planned); `tests/ui/test_qt_image.py`.
+- **Used by:** `ui/inspector/canvas.py` (`pil_to_qimage` for the frame, `checkerboard_brush` for the background) and `ui/inspector/filmstrip.py` (thumbnails, converted on the worker thread); `tests/ui/test_qt_image.py`.
 - **Uses:** nothing in the project.
 
 ## Public API

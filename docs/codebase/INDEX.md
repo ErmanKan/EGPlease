@@ -7,8 +7,8 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 |---|---|---|
 | `src/gif_editor/__init__.py` | Package docstring and `__version__ = "0.1.0"` | [page](src/gif_editor/__init__.md) |
 | `src/gif_editor/__main__.py` | `python -m gif_editor` → `app.main()` | [page](src/gif_editor/__main__.md) |
-| `src/gif_editor/app.py` | Creates the `QApplication`; placeholder main window until M2 lands | [page](src/gif_editor/app.md) |
-| `src/gif_editor/resources/icons/.gitkeep` | Empty placeholder for app icons | — |
+| `src/gif_editor/app.py` | `main()`: `QApplication` (Fusion), Pillow self-test, `MainWindow`, optional GIF path from the command line | [page](src/gif_editor/app.md) |
+| `src/gif_editor/resources/icons/.gitkeep` | Empty placeholder for app icons (none used yet: buttons use Qt standard icons) | — (empty file) |
 
 ### Core engine: `src/gif_editor/core/` (no Qt)
 | File | Summary | Page |
@@ -30,15 +30,15 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `ui/commands.py` | `SetStateCommand`: generic old → new `EditState` undo step with gesture merging | [page](src/gif_editor/ui/commands.md) |
 | `ui/workers.py` | `run_async`: run work on `QThreadPool`, callbacks on the GUI thread | [page](src/gif_editor/ui/workers.md) |
 | `ui/qt_image.py` | `pil_to_qimage` (thread-safe copy) and `checkerboard_brush` | [page](src/gif_editor/ui/qt_image.md) |
-| `ui/settings_panel.py` | Left panel: timing, size, quality, live summary and Generate *(in progress, page written by its owner)* | [page](src/gif_editor/ui/settings_panel.md) |
-| `ui/main_window.py` | Main window, menus, open/Generate orchestration *(planned, orchestrator)* | [page](src/gif_editor/ui/main_window.md) |
+| `ui/settings_panel.py` | `SettingsPanel`: left panel with timing, size, quality controls, the live summary card and the Generate button | [page](src/gif_editor/ui/settings_panel.md) |
+| `ui/main_window.py` | `MainWindow`: layout, menus and shortcuts, async open + drag-drop, Generate with progress/cancel, Save frame as PNG, trim at playhead | [page](src/gif_editor/ui/main_window.md) |
 | `ui/inspector/__init__.py` | Package marker for the right-hand inspector | [page](src/gif_editor/ui/inspector/__init__.md) |
-| `ui/inspector/canvas.py` | `FrameCanvas`: zoomable, pannable view of the current frame *(in progress, page written by its owner)* | [page](src/gif_editor/ui/inspector/canvas.md) |
-| `ui/inspector/timebar.py` | `TimeBar`: source timeline, playhead, green/red trim handles *(in progress, page written by its owner)* | [page](src/gif_editor/ui/inspector/timebar.md) |
-| `ui/inspector/filmstrip.py` | Thumbnail strip of every source frame, selection, deleted state *(in progress, page written by its owner)* | [page](src/gif_editor/ui/inspector/filmstrip.md) |
-| `ui/inspector/player.py` | `Player`: timer that steps `Document.current_index` through time *(in progress, page written by its owner)* | [page](src/gif_editor/ui/inspector/player.md) |
-| `ui/inspector/transport.py` | Playback controls row: first/prev/play/next/last *(in progress, page written by its owner)* | [page](src/gif_editor/ui/inspector/transport.md) |
-| `ui/inspector/inspector.py` | Composes canvas, timebar, filmstrip and transport into the right panel *(planned, orchestrator)* | [page](src/gif_editor/ui/inspector/inspector.md) |
+| `ui/inspector/canvas.py` | `FrameCanvas`: zoomable, pannable view of the current frame on a checkerboard, with a deleted-frame overlay | [page](src/gif_editor/ui/inspector/canvas.md) |
+| `ui/inspector/timebar.py` | `TimeBar`: custom-painted source timeline with playhead, frame ticks and snapping green/red trim handles | [page](src/gif_editor/ui/inspector/timebar.md) |
+| `ui/inspector/filmstrip.py` | `Filmstrip`: lazily loaded thumbnails of every source frame, multi-select, Delete/Restore, trim context menu | [page](src/gif_editor/ui/inspector/filmstrip.md) |
+| `ui/inspector/player.py` | `Player`: drift-free timer that steps `Document.current_index` through source or edited timing | [page](src/gif_editor/ui/inspector/player.md) |
+| `ui/inspector/transport.py` | `TransportBar`: first/prev/play/next/last buttons, Preview edits, frame info, Save frame… | [page](src/gif_editor/ui/inspector/transport.md) |
+| `ui/inspector/inspector.py` | `Inspector`: stacks canvas, transport, timebar and filmstrip into the right panel (composition only) | [page](src/gif_editor/ui/inspector/inspector.md) |
 
 ## Tests: `tests/`
 | File | Summary | Page |
@@ -63,12 +63,13 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/ui/test_workers.py` | `run_async` threading, errors, progress (2) | [page](tests/ui/test_workers.md) |
 | `tests/ui/test_qt_image.py` | `pil_to_qimage` pixels/ownership, brush (2) | [page](tests/ui/test_qt_image.md) |
 | `tests/ui/test_smoke.py` | Qt renders headlessly (1) | [page](tests/ui/test_smoke.md) |
-| `tests/ui/test_settings_panel.py` | Settings panel tests *(in progress, page written by its owner)* | [page](tests/ui/test_settings_panel.md) |
-| `tests/ui/test_canvas.py` | Frame canvas tests *(in progress, page written by its owner)* | [page](tests/ui/test_canvas.md) |
-| `tests/ui/test_timebar.py` | Timebar tests *(in progress, page written by its owner)* | [page](tests/ui/test_timebar.md) |
-| `tests/ui/test_filmstrip.py` | Filmstrip tests *(in progress, page written by its owner)* | [page](tests/ui/test_filmstrip.md) |
-| `tests/ui/test_player.py` | Player tests *(in progress, page written by its owner)* | [page](tests/ui/test_player.md) |
-| `tests/ui/test_transport.py` | Transport tests *(in progress, page written by its owner)* | [page](tests/ui/test_transport.md) |
+| `tests/ui/test_settings_panel.py` | Controls → `EditState`, merge keys, undo refresh, aspect lock, presets, summary, invalid edits, Generate button (18) | [page](tests/ui/test_settings_panel.md) |
+| `tests/ui/test_canvas.py` | Frame pixels, fit/zoom, deleted overlay, placeholder, `map_to_image`, wheel, Space/middle-drag pan (15) | [page](tests/ui/test_canvas.md) |
+| `tests/ui/test_timebar.py` | Mapping, seek, handles, snapping/Alt, one drag = one undo step, keyboard, painting speed (19) | [page](tests/ui/test_timebar.md) |
+| `tests/ui/test_filmstrip.py` | Model roles, thumbnails, selection/current sync, keys, context menu, stale results (16) | [page](tests/ui/test_filmstrip.md) |
+| `tests/ui/test_player.py` | Looping, preview mode, stepping, drift/skip/rebase with a fake clock, resync on edits and scrubs (22) | [page](tests/ui/test_player.md) |
+| `tests/ui/test_transport.py` | Label, play button state, step buttons, preview binding, save signal, tooltips, empty state (10) |
+| `tests/ui/test_main_window.py` | Integration: open/drop/errors, actions + real shortcut, trim I/O, Generate + cancel, PNG, `app.main` (14) | [page](tests/ui/test_transport.md) |
 
 ## Scripts: `scripts/`
 | File | Summary | Page |
@@ -84,8 +85,8 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `requirements-dev.txt` | Runtime + pytest, pytest-qt, ruff | [config-files](config-files.md#requirements-devtxt) |
 | `.github/workflows/ci.yml` | Windows CI: ruff + pytest with offscreen Qt | [config-files](config-files.md#githubworkflowsciyml) |
 | `.gitignore` | Ignores venv, caches, build output, `.devlibs/`, scratch | [config-files](config-files.md#gitignore) |
-| `AGENTS.md` | Contributor contract: rules, commands, interfaces, definition of done | [config-files](config-files.md#agentsmd) |
-| `README.md` | Short intro and Windows dev commands | [config-files](config-files.md#readmemd) |
+| `AGENTS.md` | Contributor contract: rules, commands, core/UI/widget interfaces, definition of done | [config-files](config-files.md#agentsmd) |
+| `README.md` | Intro, status, features, run/check commands, keyboard shortcuts | [config-files](config-files.md#readmemd) |
 | `packaging/licenses/.gitkeep` | Empty placeholder for licence texts (M5) | — |
 
 Not listed: generated/ignored paths (`.venv/`, `.devlibs/`, caches) and `docs/` itself (see [docs/README.md](../README.md)).

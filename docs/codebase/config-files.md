@@ -16,7 +16,7 @@
 | [`.github/workflows/ci.yml`](#githubworkflowsciyml) | Windows CI: lint + tests on every push/PR. |
 | [`.gitignore`](#gitignore) | Keeps venvs, caches, build output, `.devlibs/` and scratch files out of git. |
 | [`AGENTS.md`](#agentsmd) | The contributor contract: rules, commands, architecture rules, interfaces, definition of done. |
-| [`README.md`](#readmemd) | Short project intro and Windows dev commands. |
+| [`README.md`](#readmemd) | Project intro, status, features, run/check commands, keyboard shortcuts, link to the docs. |
 
 ## How it works
 
@@ -56,13 +56,13 @@ The contract every contributor (human or agent) follows:
 - **Environment note:** the libEGL setup.
 - **Architecture rules:** no Qt in core; immutable `EditState` changed only via undo commands; `plan_output` is the only planner; pipeline order; QPixmap only on the GUI thread.
 - **Gate 1 product decisions.**
-- **Interface blocks** for core and UI, with widget rules.
+- **Interface blocks** for core and UI (the `Document` hub, helpers, and each M2 widget's constructor, signals and public methods), with widget rules.
 - **Documentation and test rules**, conventional commits, the definition of done.
 
 Known drift from the code is listed in [`docs/03-architecture.md`](../03-architecture.md#known-drift-between-docs-and-code).
 
 ### `README.md`
-A short intro and the PowerShell dev/check commands. Its status line still says "Milestone 1" and its docs list stops at `02-plan.md`.
+The front page: a short intro, the status (Milestones 1–2 done, M3 next), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`) and how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py`.
 
 ## Invariants & gotchas
 - Pins appear in three places (`pyproject.toml`, `requirements*.txt`, the AGENTS.md "Stack" line). Change all three together.
@@ -75,3 +75,4 @@ A short intro and the PowerShell dev/check commands. Its status line still says 
 - `7a7b418`: scaffold (pyproject, requirements, CI, .gitignore, AGENTS.md, README).
 - `cc9f0fa`: `.devlibs/` added to `.gitignore`.
 - `0137178`: AGENTS.md gained the UI interfaces and documentation rules.
+- End of M2 (docs pass): AGENTS.md gained the per-widget interfaces, `run_async(pool=)`, the full pipeline API and the corrected libEGL trust statement; README rewritten for the M2 status.

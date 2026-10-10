@@ -2,7 +2,7 @@
 
 How the tests are organised, how to run them here and on Windows, how GIF fixtures are generated, and how headless Qt works in the dev container.
 
-Current state: **410 tests, 408 passed, 2 xfailed** (`scripts/test.sh`, about 8 s).
+Current state (end of Milestone 2): **524 tests, 522 passed, 2 xfailed** (`scripts/test.sh`, about 11 s), stable over repeated runs.
 
 ## Running the tests
 
@@ -37,14 +37,55 @@ tests/
 │  └─ test_selftest.py       6   Pillow-internals self-test
 └─ ui/                    pytest-qt, needs offscreen Qt
    ├─ conftest.py            gif_path, doc fixtures
-   ├─ test_document.py      11   Document + undo
-   ├─ test_workers.py        2   run_async threading
-   ├─ test_qt_image.py       2   PIL→QImage, checkerboard
-   └─ test_smoke.py          1   Qt renders headlessly
+   ├─ test_document.py      11   Document + undo                  ┐
+   ├─ test_workers.py        2   run_async threading              │ foundation
+   ├─ test_qt_image.py       2   PIL→QImage, checkerboard         │
+   ├─ test_smoke.py          1   Qt renders headlessly            ┘
+   ├─ test_settings_panel.py 18  controls → EditState, undo       ┐
+   ├─ test_canvas.py        15   zoom, overlay, pan               │
+   ├─ test_timebar.py       19   seek, trim handles, snapping     │ one file per widget
+   ├─ test_filmstrip.py     16   thumbnails, selection, keys      │
+   ├─ test_player.py        22   timing, looping, preview         │
+   ├─ test_transport.py     10   buttons, label, bindings         ┘
+   └─ test_main_window.py   14   whole-window integration
 ```
-Numbers are collected test cases (parametrizations counted). The M2 widget tests (`test_settings_panel.py`, `test_canvas.py`, `test_timebar.py`, `test_filmstrip.py`, `test_player.py`, `test_transport.py`) are being added by their owners; see the [INDEX](codebase/INDEX.md).
+Numbers are collected test cases (parametrizations counted).
 
 Each test file has its own page under [`codebase/tests/`](codebase/tests/) listing what each group verifies and the notable gaps.
+
+## The UI test layer
+
+UI tests come in three tiers. All of them use pytest-qt and run on the `offscreen` platform.
+
+| Tier | Files | Builds | Checks |
+|---|---|---|---|
+| Foundation | `test_document.py`, `test_workers.py`, `test_qt_image.py`, `test_smoke.py` | `Document`, `run_async`, helpers | the contract every widget relies on (undo, merging, signals, cross-thread delivery) |
+| Widget | `test_settings_panel.py`, `test_canvas.py`, `test_timebar.py`, `test_filmstrip.py`, `test_player.py`, `test_transport.py` | **one widget** + the `doc` fixture | the widget's input → `Document` call, and `Document` signal → what the widget shows; empty/closed states; painting doesn't crash |
+| Integration | `test_main_window.py` | the whole `MainWindow` | wiring: actions and a real shortcut, async open/drop, Generate + cancel end to end, PNG export, `app.main` |
+
+**Widget tests** construct the widget alone with `Widget(doc)` (the transport also gets a `Player`). Because widgets talk only to `Document`, no other widget is needed. They drive input with simulated mouse/keys, or hand-built `QMouseEvent`s when modifiers matter (e.g. Alt on the timebar). They assert on `doc.state`, `doc.current_index` and signals, and they check that undo moves the widget back. Timing-sensitive code is tested without real time: `Player(clock=fake, time_scale=...)` injects a fake monotonic clock.
+
+**Integration tests** use a shown `MainWindow` (fixture `win`) and the non-dialog entry points (`open_file`, `generate_to`, `save_frame_to`). Errors are asserted on `win.last_error`, which works because the window shows errors with the non-blocking `QMessageBox.open()`. A `QMessageBox.exec()` or a file dialog would block a headless test forever. Background work is awaited with `qtbot.waitUntil(lambda: not win.is_busy)`. Generate is real: the test reads the output back with `encoder.read_back`. Details: [test_main_window page](codebase/tests/ui/test_main_window.md).
+
+### The deleteLater teardown trap
+pytest-qt's teardown hook `close()`s and `deleteLater()`s every widget registered with `qtbot.addWidget` **before** your fixture's code after `yield` runs. Anything there that spins the event loop (`qtbot.waitUntil`, `waitSignal`, `processEvents`) lets Qt process the `DeferredDelete`, and the widget (and children such as the filmstrip's model) is destroyed. A worker that finishes after that delivers its result to nothing.
+
+This bit the filmstrip: its fixture polled `w.frame_model.is_loading` after `yield`, the model died mid-poll, the last thumbnail batch was never delivered, and the test flaked with a timeout. The fix:
+```python
+@pytest.fixture
+def strip(qtbot, doc):
+    w = Filmstrip(doc)
+    qtbot.addWidget(w)
+    w.show()
+    yield w
+    # Widget already closed + deleteLater()ed: don't touch it. Just let pool jobs finish
+    # before the doc fixture closes the source.
+    QThreadPool.globalInstance().waitForDone(5000)
+```
+Rules:
+- In teardown, never touch a widget registered with `addWidget`. Wait for the **thread pool** (`QThreadPool.globalInstance().waitForDone(ms)`), not for the widget.
+- Better still, finish background work **inside the test**. The `win` fixture's teardown `waitUntil(lambda: not w.is_busy)` only reads plain Python flags, and every test already waits for its open/Generate to complete before returning.
+- Fixture order matters: `doc` closes the source in its own teardown, so workers must be finished first, or they hit `ValueError("GifSource is closed")` (which the filmstrip tolerates and records as a failed thumbnail).
 
 ## gifgen vs the corpus
 
@@ -81,7 +122,7 @@ There are no skips in the container. `test_decoder_corpus.py::test_descriptor_bo
 PySide6's QtGui links against `libEGL.so.1`. The Linux dev container does not have it, so `import PySide6.QtGui` fails, and no system packages may be installed. The fix, approved by the user:
 
 1. [`scripts/fetch-devlibs.sh`](codebase/scripts/fetch-devlibs.md) downloads Debian's `libegl1_1.7.0-1+b2_amd64.deb` into `.devlibs/debs/`, **verifies its SHA-256** against the pinned value, and unpacks it with `dpkg-deb -x` into `.devlibs/root/`. No maintainer scripts run, nothing outside the repo changes, and `.devlibs/` is gitignored.
-   - **Trust chain:** Debian archive keyring → signed `InRelease` → `Packages` index → package SHA-256. The first three links were verified **once, by hand, when the hash was pinned**. The script re-checks only the pinned SHA-256 on every run, so the pin is the trust anchor.
+   - **Trust chain:** Debian archive keyring → signed `InRelease` → `Packages` index → package SHA-256. The script checks **only the pinned SHA-256**, on every run, so the pin is the trust anchor. The rest of the chain was verified **once, by hand, when the hash was pinned**: `sqv --message` on `InRelease` with the Debian archive keyring, then the `Packages.xz` hash against the authenticated `Release`, then the package's SHA-256 from that index. The commands are on the [fetch-devlibs page](codebase/scripts/fetch-devlibs.md#trust-chain).
 2. [`scripts/test.sh`](codebase/scripts/test.md) runs the fetch script if the library is missing, prepends `.devlibs/root/usr/lib/x86_64-linux-gnu` to `LD_LIBRARY_PATH`, and sets `QT_QPA_PLATFORM=offscreen`.
 
 The `offscreen` platform plugin renders into memory with no display, so widgets can be shown, grabbed and painted in tests. `tests/ui/test_smoke.py` is the canary: if it fails, the environment is broken, not the code.
@@ -100,7 +141,7 @@ pytest-qt provides the `qtbot` fixture. Requesting it ensures a `QApplication` e
 | `qtbot.waitUntil(cond, timeout=ms)` | spin the event loop until `cond()` is true; needed for queued cross-thread signals | `test_workers.py` |
 | Direct `signal.connect(list.append)` | record emissions synchronously (same-thread signals are delivered immediately) | `test_document.py::test_apply_undo_redo` |
 
-Widget tests that the M2 workers add typically also use `qtbot.mouseClick`/`mousePress`/`mouseMove`/`keyClick` and `widget.grab()` to check painting.
+The widget tests also use `qtbot.mouseClick`/`mousePress`/`mouseMove`/`keyClick` and `widget.grab()` to check painting.
 
 Rules:
 - Keep Qt imports out of `tests/conftest.py` and `tests/core/`, so core tests run with `-p no:pytest-qt`.
@@ -113,7 +154,7 @@ Rules:
    - simple: `make_gif(tmp_path / "a.gif", solid_frames(5), [100, 50, ...], disposal=..., loop=...)`;
    - exotic: build a `corpus.GifSpec` with `FrameSpec`s, write `corpus.encode_gif(spec)[0]`, and compare frames with `corpus.normalize_rgba(...)` against `corpus.compose(spec)`;
    - an existing corpus entry: request the `corpus` fixture and use `corpus["name"]`.
-3. **For UI tests**, request `doc` (a `Document` with an 8-frame 40×30 GIF open) and `qtbot`. Construct widgets as `Widget(doc)` and `qtbot.addWidget(w)`. Drive them through `Document` methods or simulated input, and assert on `doc.state` and signals.
+3. **For UI tests**, request `doc` (a `Document` with an 8-frame 40×30 GIF open) and `qtbot`. Construct widgets as `Widget(doc)` and `qtbot.addWidget(w)`. Drive them through `Document` methods or simulated input, and assert on `doc.state` and signals. If the widget starts background work, wait for the pool in teardown (see [the deleteLater trap](#the-deletelater-teardown-trap)). For a behaviour that needs several widgets or a menu action, add a case to `test_main_window.py`.
 4. **Prefer tables and properties.** `pytest.mark.parametrize` for edge-case tables. For algorithms, a seeded random loop that checks invariants against an independent model (see `test_timeline.py::test_random_invariants`).
 5. **Known Pillow differences:** add an `xfail(strict=True)` with the exact reason, never a loose xfail.
 6. Run `scripts/test.sh`. It must be lint-clean and green. Update the test file's page under `docs/codebase/tests/` in the same commit.
