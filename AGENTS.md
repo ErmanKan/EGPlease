@@ -84,6 +84,27 @@ read_back(path) -> tuple[int, list[int]]                   # (frame_count, durat
 estimate_size(sample_frames, total_frames) -> int
 ```
 
+## UI interfaces (contract, Milestone 2)
+```python
+# ui/document.py  (implemented): the hub. Widgets talk ONLY to Document, never to each other.
+Document(QObject)
+  signals: sourceChanged(), stateChanged(EditState), currentIndexChanged(int), selectionChanged(frozenset)
+  .source .meta .path .is_open .state .current_index .selection .undo_stack (QUndoStack)
+  .set_source(GifSource, path)  .close()
+  .apply(new_state, text, merge_key=None)   # ONLY way to change EditState (undoable; ValueError if invalid)
+  .delete_frames(idx) .restore_frames(idx) .set_trim(start_ms, duration_ms|None, merge_key="trim")
+  .set_current_index(i) .set_selection(idx) .plan() .summary() .frame_start_ms(i)
+# ui/commands.py  SetStateCommand(doc, old, new, text, merge_key)  # same merge_key => one undo step
+# ui/workers.py   run_async(fn, on_done=, on_error=, on_progress=)  # callbacks on GUI thread
+# ui/qt_image.py  pil_to_qimage(img) -> QImage ; checkerboard_brush(cell=8) -> QBrush
+```
+Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels).
+
+## Documentation (required, part of done)
+- Every file in `src/`, `tests/` and `scripts/` has a page `docs/codebase/<same path without extension>.md` following `docs/codebase/_TEMPLATE.md`, and one line in `docs/codebase/INDEX.md`.
+- When you create or meaningfully change a file, write or update its page in the same commit. Explain *why*, not just *what*. Keep `docs/03-architecture.md` true if you change structure.
+- Every module, class and public function has a docstring. Write comments for non-obvious logic.
+
 ## Tests
 - pytest; generate fixture GIFs in code (`tests/gifgen.py`, `tests/corpus.py`). Never commit binary fixtures.
 - Each core module has `tests/core/test_<module>.py`. UI tests use pytest-qt with `QT_QPA_PLATFORM=offscreen`.
@@ -93,4 +114,4 @@ estimate_size(sample_frames, total_frames) -> int
 - Commit ONLY your own files: `git add <paths>` then `git commit`. If `index.lock` exists, wait 3 s and retry (other workers commit in parallel). Never `git add -A`, never rewrite history, never push.
 
 ## Definition of done
-`ruff check` and `ruff format --check` are clean, all tests pass, new code has tests, the public interfaces match this file, and the work is committed.
+`ruff check` and `ruff format --check` are clean, all tests pass (`scripts/test.sh`), new code has tests, the public interfaces match this file, the per-file doc pages are written or updated, and the work is committed.
