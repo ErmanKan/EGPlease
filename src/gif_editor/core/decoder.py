@@ -13,10 +13,12 @@ transparent. This module therefore only uses Pillow for LZW decompression and do
   (delay, disposal, transparency index), the NETSCAPE2.0/ANIMEXTS1.0 loop extension and image
   descriptors (rect, interlace, local table). Image data sub-blocks are skipped by their length
   bytes only; for each frame we remember the byte range of its LZW data.
-* **LZW**: a frame's index pixels are decoded by Pillow's C ``"gif"`` decoder through the public
-  ``Image.frombytes(mode, size, data, "gif", bits, interlace, transparency)`` entry point
-  (decoder args mirror the tile ``GifImagePlugin`` builds; stable since Pillow 9). Nothing
-  else from Pillow's GIF plugin is used, so ``GifImagePlugin.LOADING_STRATEGY`` is untouched.
+* **LZW**: a frame's index pixels are decoded by Pillow's C ``"gif"`` decoder through the
+  instance method ``Image.Image.frombytes(data, "gif", bits, interlace, -1)`` called on a
+  pre-allocated ``"P"`` image of the rows we need (``_decode_indices``). The decoder args
+  mirror the tile ``GifImagePlugin`` builds; they are undocumented, so ``core/selftest.py``
+  checks them at startup. Nothing else from Pillow's GIF plugin is used, so
+  ``GifImagePlugin.LOADING_STRATEGY`` is untouched.
 * **Compositor** (numpy): canvas starts transparent; a frame paints its non-transparent pixels
   (clipped to the canvas) with its local or global palette (indices beyond the table are
   opaque black); after the frame is shown, disposal 0/1 (and the undefined 4..7) keep it,
