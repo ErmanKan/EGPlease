@@ -2,6 +2,8 @@
 
 Where Pillow genuinely differs from browser semantics the case is marked
 ``xfail(strict=True)`` with the exact difference, so a Pillow change is noticed.
+These tests document *raw Pillow*; our own compositor (``GifSource``) is checked against the
+same entries, without xfails, in ``tests/core/test_decoder_corpus.py``.
 """
 
 from __future__ import annotations

@@ -1,27 +1,48 @@
-"""GIF decoding: metadata index pass + thread-safe, byte-budgeted frame cache.
+"""GIF decoding with browser disposal semantics + a thread-safe, byte-budgeted frame cache.
 
-Strategy
---------
-* ``GifSource.open`` runs one sequential *index pass* over the file with Pillow. For every
-  frame it records a :class:`FrameMeta`, composites the frame to RGBA (Pillow applies the
-  disposal methods while seeking) and checks for transparency. Frames that decode are fed
-  into the cache, so if the whole animation fits ``cache_budget_bytes`` every frame is
-  cached eagerly and later ``frame(i)`` calls never touch the file.
-* If a frame fails to decode after at least one good frame (truncated/corrupt file), the
-  pass stops, the good frames are kept and a message is appended to ``warnings``. Zero
+Why our own compositor
+----------------------
+Pillow (12.x) composites GIF frames itself while seeking, but not like browsers do: when the
+first frame has no transparency index Pillow keeps an RGB canvas, so disposal 2 ("restore to
+background") fills the frame rectangle with an *opaque* colour and later frames lose their
+transparency. Browsers start from a fully transparent canvas and clear disposal-2 rectangles to
+transparent. This module therefore only uses Pillow for LZW decompression and does the rest:
+
+* **Block parser** (pure Python, fast): ``GifSource.open`` reads the file once and walks the
+  GIF block structure — header, logical screen, colour tables, Graphic Control Extensions
+  (delay, disposal, transparency index), the NETSCAPE2.0/ANIMEXTS1.0 loop extension and image
+  descriptors (rect, interlace, local table). Image data sub-blocks are skipped by their length
+  bytes only; for each frame we remember the byte range of its LZW data.
+* **LZW**: a frame's index pixels are decoded by Pillow's C ``"gif"`` decoder through the public
+  ``Image.frombytes(mode, size, data, "gif", bits, interlace, transparency)`` entry point
+  (decoder args mirror the tile ``GifImagePlugin`` builds; stable since Pillow 9). Nothing
+  else from Pillow's GIF plugin is used, so ``GifImagePlugin.LOADING_STRATEGY`` is untouched.
+* **Compositor** (numpy): canvas starts transparent; a frame paints its non-transparent pixels
+  (clipped to the canvas) with its local or global palette (indices beyond the table are
+  opaque black); after the frame is shown, disposal 0/1 (and the undefined 4..7) keep it,
+  2 clears its rect to transparent, 3 restores the rect to its pre-frame content.
+
+Robustness / limits
+-------------------
+* Not a GIF, missing file, canvas > ``2 * Image.MAX_IMAGE_PIXELS`` (Pillow's decompression
+  bomb threshold), canvas side > ``max_canvas_side``, more than ``max_frames`` frames or zero
   decodable frames -> :class:`GifLoadError`.
-* The cache is an LRU of composited RGBA frames measured in bytes (``w * h * 4``). Every
-  ``keyframe_interval``-th frame is *pinned* (never evicted) as long as the pinned set fits
-  in a quarter of the budget; the rest of the budget is a plain LRU.
-* Pillow cannot resume decoding from a stored canvas, so a cache miss is served by seeking
-  the open Pillow image: forward from its current position when possible, rewinding to
-  frame 0 only when going backwards. Keyframes passed on the way are cached, so later
-  random access is mostly cache hits.
-* ``GifImagePlugin.LOADING_STRATEGY`` is a module global read during every seek/load. It is
-  set to ``RGB_ALWAYS`` only while this module talks to Pillow (under a module-wide lock)
-  and restored afterwards. ``Image.MAX_IMAGE_PIXELS`` is left at its default.
-* All Pillow access and cache mutation is guarded by a per-source lock, so ``frame()`` and
-  ``thumbnail()`` can be called from worker threads.
+* The file ending inside a frame drops that frame and later ones (warning). A structurally
+  complete frame whose LZW stream is short/corrupt keeps the pixels that did decode (like
+  browsers) and adds a warning. Missing trailer -> warning.
+
+Cache
+-----
+* ``open`` composites every frame once (needed for ``has_transparency`` and to validate the
+  data) and feeds the results into an LRU of RGBA frames measured in ``w * h * 4`` bytes.
+* Every ``keyframe_interval``-th frame gets a *checkpoint*: the canvas state right before it
+  is drawn. Checkpoints are pinned and use at most a quarter of the budget; if they do not fit
+  the interval is doubled (dropping every other checkpoint), so they stay spread over the whole
+  animation. A cache miss for frame ``i`` resumes from the nearest of: the newest checkpoint
+  ``<= i``, a cached frame ``j < i`` whose disposal is not 3 (its post-disposal canvas is
+  derivable from the image), or the canvas left by the last render. Backward seeks therefore
+  cost at most ``keyframe_interval`` frame decodes instead of O(i).
+* All file access and cache mutation happen under a per-source lock (thread-safe).
 """
 
 from __future__ import annotations
@@ -29,29 +50,17 @@ from __future__ import annotations
 import contextlib
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import BinaryIO
 
-from PIL import GifImagePlugin, Image
+import numpy as np
+from PIL import Image
 
 __all__ = ["FrameMeta", "GifLoadError", "GifSource", "Limits", "SourceMeta"]
 
-_DECODE_ERRORS = (OSError, EOFError, SyntaxError, ValueError)
-_STRATEGY_LOCK = threading.RLock()
-
-
-@contextlib.contextmanager
-def _rgb_always() -> Iterator[None]:
-    """Temporarily force Pillow's RGB_ALWAYS GIF loading strategy (process-wide lock)."""
-    with _STRATEGY_LOCK:
-        previous = GifImagePlugin.LOADING_STRATEGY
-        GifImagePlugin.LOADING_STRATEGY = GifImagePlugin.LoadingStrategy.RGB_ALWAYS
-        try:
-            yield
-        finally:
-            GifImagePlugin.LOADING_STRATEGY = previous
+_DECODE_ERRORS = (OSError, EOFError, SyntaxError, ValueError, MemoryError)
 
 
 @dataclass(frozen=True)
@@ -97,54 +106,342 @@ def _effective_delay(delay_ms: int) -> int:
     return 100 if delay_ms <= 10 else delay_ms
 
 
+# ------------------------------------------------------------------------------- parsing
+
+
+class _Truncated(Exception):
+    """The byte stream ended inside a block."""
+
+
+@dataclass(frozen=True)
+class _RawFrame:
+    left: int
+    top: int
+    width: int
+    height: int
+    interlace: bool
+    bits: int  # LZW minimum code size
+    data_start: int  # first sub-block length byte
+    data_end: int  # one past the block terminator
+    lut: np.ndarray  # (256, 4) uint8 RGBA, alpha 255
+    transparent: int | None
+    disposal: int
+    delay_ms: int
+
+
+@dataclass
+class _Parsed:
+    width: int
+    height: int
+    loop: int | None
+    frames: list[_RawFrame]
+    warnings: list[str]
+
+
+def _make_lut(table: bytes | None) -> np.ndarray:
+    lut = np.zeros((256, 4), dtype=np.uint8)
+    lut[:, 3] = 255
+    if table:
+        rgb = np.frombuffer(table, dtype=np.uint8).reshape(-1, 3)[:256]
+        lut[: len(rgb), :3] = rgb
+    return lut
+
+
+def _read_header(data: bytes, name: str) -> tuple[int, int, int, int]:
+    """Validate the signature; return (width, height, logical-screen flags, header end)."""
+    if len(data) < 6 or data[:6] not in (b"GIF87a", b"GIF89a"):
+        raise GifLoadError(f"Not a GIF file: {name}")
+    if len(data) < 13:
+        raise GifLoadError(f"No decodable frames in {name}: header is truncated")
+    width = int.from_bytes(data[6:8], "little")
+    height = int.from_bytes(data[8:10], "little")
+    return width, height, data[10], 13
+
+
+def _skip_sub_blocks(data: bytes, pos: int) -> int:
+    """Return the position after the block terminator of the sub-block chain at ``pos``."""
+    n = len(data)
+    while True:
+        if pos >= n:
+            raise _Truncated
+        size = data[pos]
+        pos += 1
+        if size == 0:
+            return pos
+        pos += size
+        if pos > n:
+            raise _Truncated
+
+
+def _parse(data: bytes, name: str, limits: Limits) -> _Parsed:
+    width, height, flags, pos = _read_header(data, name)
+    if width <= 0 or height <= 0:
+        raise GifLoadError(f"Invalid canvas size {width}x{height}")
+    max_pixels = Image.MAX_IMAGE_PIXELS
+    if max_pixels is not None and width * height > 2 * max_pixels:
+        raise GifLoadError(
+            f"Image is too large to open safely: {width}x{height} = {width * height} pixels "
+            f"exceeds the limit of {2 * max_pixels}"
+        )
+    if max(width, height) > limits.max_canvas_side:
+        raise GifLoadError(
+            f"Canvas {width}x{height} exceeds the maximum side of {limits.max_canvas_side} px"
+        )
+
+    warnings: list[str] = []
+    global_lut: np.ndarray | None = None
+    if flags & 0x80:
+        size = 3 << ((flags & 7) + 1)
+        if pos + size > len(data):
+            raise GifLoadError(f"No decodable frames in {name}: colour table is truncated")
+        global_lut = _make_lut(data[pos : pos + size])
+        pos += size
+    default_lut = global_lut if global_lut is not None else _make_lut(None)
+
+    loop: int | None = None
+    frames: list[_RawFrame] = []
+    gce: tuple[int, int, int | None] | None = None  # (disposal, delay_ms, transparent)
+    n = len(data)
+    trailer = False
+    try:
+        while pos < n:
+            block = data[pos]
+            if block == 0x3B:  # trailer
+                trailer = True
+                break
+            if block == 0x21:  # extension
+                if pos + 2 > n:
+                    raise _Truncated
+                label = data[pos + 1]
+                start = pos + 2
+                pos = _skip_sub_blocks(data, start)
+                if label == 0xF9 and data[start] >= 4:
+                    packed = data[start + 1]
+                    delay = int.from_bytes(data[start + 2 : start + 4], "little") * 10
+                    transparent = data[start + 4] if packed & 1 else None
+                    gce = ((packed >> 2) & 7, delay, transparent)
+                elif label == 0xFF and data[start] == 11:
+                    ident = data[start + 1 : start + 12]
+                    sub = start + 12
+                    if (
+                        ident in (b"NETSCAPE2.0", b"ANIMEXTS1.0")
+                        and sub < pos - 1
+                        and data[sub] >= 3
+                        and data[sub + 1] == 1
+                    ):
+                        loop = int.from_bytes(data[sub + 2 : sub + 4], "little")
+                continue
+            if block != 0x2C:
+                warnings.append(
+                    f"Unexpected data (byte 0x{block:02x}) after frame {len(frames)}; "
+                    "the rest of the file was ignored."
+                )
+                break
+            if pos + 10 > n:
+                raise _Truncated
+            left, top, fw, fh = (
+                int.from_bytes(data[pos + k : pos + k + 2], "little") for k in (1, 3, 5, 7)
+            )
+            packed = data[pos + 9]
+            pos += 10
+            lut = default_lut
+            if packed & 0x80:
+                size = 3 << ((packed & 7) + 1)
+                if pos + size > n:
+                    raise _Truncated
+                lut = _make_lut(data[pos : pos + size])
+                pos += size
+            if pos >= n:
+                raise _Truncated
+            bits = data[pos]
+            data_start = pos + 1
+            pos = _skip_sub_blocks(data, data_start)
+            if len(frames) >= limits.max_frames:
+                raise GifLoadError(f"GIF has more than {limits.max_frames} frames")
+            disposal, delay, transparent = gce if gce is not None else (0, 0, None)
+            gce = None
+            frames.append(
+                _RawFrame(
+                    left,
+                    top,
+                    fw,
+                    fh,
+                    bool(packed & 0x40),
+                    bits,
+                    data_start,
+                    pos,
+                    lut,
+                    transparent,
+                    disposal,
+                    delay,
+                )
+            )
+    except _Truncated:
+        if frames:
+            warnings.append(
+                f"The file is truncated inside frame {len(frames) + 1}; "
+                f"loaded the first {len(frames)} frame(s)."
+            )
+        trailer = True  # already reported
+    if not frames:
+        raise GifLoadError(f"No decodable frames in {name}")
+    if not trailer and not warnings:
+        warnings.append("The file appears to be truncated (missing GIF trailer).")
+    return _Parsed(width, height, loop, frames, warnings)
+
+
+# ------------------------------------------------------------------------------ decoding
+
+
+def _decode_indices(f: _RawFrame, blob: bytes) -> tuple[np.ndarray, np.ndarray | None]:
+    """LZW-decode a frame. Returns (indices (h, w) uint8, written mask or None if complete)."""
+    size = (f.width, f.height)
+    if not 1 <= f.bits <= 12:
+        raise ValueError(f"invalid LZW code size {f.bits}")
+    if f.width == 0 or f.height == 0:
+        return np.zeros((f.height, f.width), dtype=np.uint8), None
+    args = (f.bits, int(f.interlace), -1)
+    a = Image.new("P", size, 0)
+    try:
+        a.frombytes(blob, "gif", *args)
+        return np.asarray(a, dtype=np.uint8), None
+    except ValueError:
+        pass
+    # Partial data: decode again onto a different fill to find which pixels were written.
+    b = Image.new("P", size, 255)
+    with contextlib.suppress(ValueError):
+        b.frombytes(blob, "gif", *args)
+    ia = np.asarray(a, dtype=np.uint8)
+    return ia, ia == np.asarray(b, dtype=np.uint8)
+
+
+class _Compositor:
+    """Applies one frame to a canvas (H, W, 4 uint8) in place."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+
+    def blank(self) -> np.ndarray:
+        return np.zeros((self.height, self.width, 4), dtype=np.uint8)
+
+    def clip(self, f: _RawFrame) -> tuple[int, int, int, int] | None:
+        x0, y0 = min(f.left, self.width), min(f.top, self.height)
+        x1, y1 = min(f.left + f.width, self.width), min(f.top + f.height, self.height)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return x0, y0, x1, y1
+
+    def draw(
+        self, canvas: np.ndarray, f: _RawFrame, idx: np.ndarray, written: np.ndarray | None
+    ) -> np.ndarray | None:
+        """Paint frame ``f``. Returns the saved rect content when disposal is 3."""
+        rect = self.clip(f)
+        if rect is None:
+            return None
+        x0, y0, x1, y1 = rect
+        region = canvas[y0:y1, x0:x1]
+        saved = region.copy() if f.disposal == 3 else None
+        sub = idx[: y1 - y0, : x1 - x0]
+        # One 32-bit gather per pixel (RGBA packed in native order) is ~5x faster than
+        # gathering (N, 4) uint8 rows.
+        colours = f.lut.view(np.uint32).reshape(256)[sub]
+        mask = None if f.transparent is None else sub != f.transparent
+        if written is not None:
+            w = written[: y1 - y0, : x1 - x0]
+            mask = w if mask is None else mask & w
+        region32 = region.view(np.uint32).reshape(region.shape[:2])
+        if mask is None:
+            region32[...] = colours
+        else:
+            np.copyto(region32, colours, where=mask)
+        return saved
+
+    def dispose(self, canvas: np.ndarray, f: _RawFrame, saved: np.ndarray | None) -> None:
+        rect = self.clip(f)
+        if rect is None:
+            return
+        x0, y0, x1, y1 = rect
+        if f.disposal == 2:
+            canvas[y0:y1, x0:x1] = 0
+        elif f.disposal == 3 and saved is not None:
+            canvas[y0:y1, x0:x1] = saved
+
+
+def _to_image(canvas: np.ndarray) -> Image.Image:
+    return Image.fromarray(canvas.copy())
+
+
+# --------------------------------------------------------------------------------- cache
+
+
 class _FrameCache:
-    """Byte-budgeted LRU with pinned keyframes. Not thread-safe on its own."""
+    """LRU of composited frames + pinned canvas checkpoints. Not thread-safe on its own."""
 
     def __init__(self, budget: int, frame_bytes: int, keyframe_interval: int) -> None:
         self.budget = max(0, budget)
         self.frame_bytes = max(1, frame_bytes)
         self.keyframe_interval = max(1, keyframe_interval)
         self.pin_budget = self.budget // 4
-        self.pinned: dict[int, Image.Image] = {}
+        self.checkpoints: dict[int, np.ndarray] = {}  # frame -> canvas before drawing it
         self.lru: OrderedDict[int, Image.Image] = OrderedDict()
 
     @property
     def used_bytes(self) -> int:
-        return (len(self.pinned) + len(self.lru)) * self.frame_bytes
+        return (len(self.checkpoints) + len(self.lru)) * self.frame_bytes
 
     def get(self, i: int) -> Image.Image | None:
-        img = self.pinned.get(i)
-        if img is not None:
-            return img
         img = self.lru.get(i)
         if img is not None:
             self.lru.move_to_end(i)
         return img
 
+    def lru_capacity(self) -> int:
+        """How many frames the LRU can hold next to the current checkpoints."""
+        return max(0, self.budget - len(self.checkpoints) * self.frame_bytes) // self.frame_bytes
+
     def is_keyframe(self, i: int) -> bool:
         return i % self.keyframe_interval == 0
 
     def put(self, i: int, img: Image.Image) -> None:
-        if i in self.pinned:
-            return
-        if self.is_keyframe(i) and (len(self.pinned) + 1) * self.frame_bytes <= self.pin_budget:
-            self.lru.pop(i, None)
-            self.pinned[i] = img
-            self._evict()
-            return
-        if self.frame_bytes > self.budget:
+        if self.frame_bytes > self.budget - len(self.checkpoints) * self.frame_bytes:
             return
         self.lru[i] = img
         self.lru.move_to_end(i)
         self._evict()
+
+    def put_checkpoint(self, i: int, canvas: np.ndarray) -> None:
+        if i in self.checkpoints or not self.is_keyframe(i):
+            return
+        if self.frame_bytes > self.pin_budget:
+            return
+        while (len(self.checkpoints) + 1) * self.frame_bytes > self.pin_budget:
+            self.keyframe_interval *= 2
+            self.checkpoints = {
+                k: v for k, v in self.checkpoints.items() if k % self.keyframe_interval == 0
+            }
+            if not self.is_keyframe(i):
+                return
+        self.checkpoints[i] = canvas.copy()
+        self._evict()
+
+    def nearest_checkpoint(self, i: int) -> int | None:
+        best = None
+        for k in self.checkpoints:
+            if k <= i and (best is None or k > best):
+                best = k
+        return best
 
     def _evict(self) -> None:
         while self.lru and self.used_bytes > self.budget:
             self.lru.popitem(last=False)
 
     def clear(self) -> None:
-        self.pinned.clear()
+        self.checkpoints.clear()
         self.lru.clear()
+
+
+# -------------------------------------------------------------------------------- source
 
 
 class GifSource:
@@ -152,17 +449,19 @@ class GifSource:
 
     def __init__(
         self,
-        im: Image.Image,
+        fp: BinaryIO,
+        parsed: _Parsed,
         meta: SourceMeta,
-        warnings: list[str],
         cache: _FrameCache,
-        limits: Limits,
+        last: tuple[int, np.ndarray] | None,
     ) -> None:
-        self._im: Image.Image | None = im
+        self._fp: BinaryIO | None = fp
+        self._frames = parsed.frames[: meta.frame_count]
         self._meta = meta
-        self.warnings = warnings
+        self.warnings = parsed.warnings
         self._cache = cache
-        self._limits = limits
+        self._comp = _Compositor(meta.width, meta.height)
+        self._last = last  # (index, canvas after disposing that frame)
         self._lock = threading.Lock()
         self._thumbs: dict[tuple[int, int], Image.Image] = {}
 
@@ -172,77 +471,59 @@ class GifSource:
         path = Path(path)
         if not path.is_file():
             raise GifLoadError(f"File not found: {path}")
-        with _rgb_always():
-            try:
-                im = Image.open(path)
-            except Image.DecompressionBombError as e:
-                raise GifLoadError(f"Image is too large to open safely: {e}") from e
-            except (OSError, SyntaxError, ValueError) as e:
-                raise GifLoadError(f"Not a readable image: {path.name} ({e})") from e
-            try:
-                return cls._index(im, path, limits)
-            except BaseException:
-                im.close()
-                raise
+        try:
+            fp = path.open("rb")
+        except OSError as e:
+            raise GifLoadError(f"Cannot read {path.name}: {e}") from e
+        try:
+            data = fp.read()
+            parsed = _parse(data, path.name, limits)
+            return cls._index(fp, data, parsed, path, limits)
+        except BaseException:
+            fp.close()
+            raise
 
     @classmethod
-    def _index(cls, im: Image.Image, path: Path, limits: Limits) -> GifSource:
-        if im.format != "GIF":
-            raise GifLoadError(f"Not a GIF file: {path.name} (format {im.format or 'unknown'})")
-        width, height = im.size
-        if width <= 0 or height <= 0:
-            raise GifLoadError(f"Invalid canvas size {width}x{height}")
-        if max(width, height) > limits.max_canvas_side:
-            raise GifLoadError(
-                f"Canvas {width}x{height} exceeds the maximum side of {limits.max_canvas_side} px"
-            )
-        loop = im.info.get("loop")
+    def _index(
+        cls, fp: BinaryIO, data: bytes, parsed: _Parsed, path: Path, limits: Limits
+    ) -> GifSource:
+        width, height = parsed.width, parsed.height
+        comp = _Compositor(width, height)
         cache = _FrameCache(limits.cache_budget_bytes, width * height * 4, limits.keyframe_interval)
-        frames: list[FrameMeta] = []
-        warnings: list[str] = []
+        canvas = comp.blank()
+        metas: list[FrameMeta] = []
         has_alpha = False
-        i = 0
-        while True:
-            if i > 0:
-                try:
-                    im.seek(i)
-                except EOFError:
-                    break  # normal end of animation
-                except _DECODE_ERRORS as e:
-                    warnings.append(_partial_warning(i, e))
-                    break
-            if i >= limits.max_frames:
-                raise GifLoadError(f"GIF has more than {limits.max_frames} frames")
+        for i, f in enumerate(parsed.frames):
             try:
-                rgba = im.convert("RGBA")
-            except Image.DecompressionBombError as e:
-                raise GifLoadError(f"Image is too large to open safely: {e}") from e
+                idx, written = _decode_indices(f, data[f.data_start : f.data_end])
             except _DECODE_ERRORS as e:
                 if i == 0:
                     raise GifLoadError(f"No decodable frames in {path.name}: {e}") from e
-                warnings.append(_partial_warning(i, e))
+                parsed.warnings.append(_partial_warning(i, e))
                 break
-            delay = int(im.info.get("duration", 0) or 0)
-            disposal = int(getattr(im, "disposal_method", 0) or 0)
-            frames.append(FrameMeta(i, delay, _effective_delay(delay), disposal))
+            if written is not None:
+                parsed.warnings.append(
+                    f"Frame {i + 1} has incomplete or corrupt image data; "
+                    "the undecodable pixels were left unchanged."
+                )
+            cache.put_checkpoint(i, canvas)
+            saved = comp.draw(canvas, f, idx, written)
             if not has_alpha:
-                has_alpha = rgba.getchannel("A").getextrema()[0] < 255
-            cache.put(i, rgba)
-            i += 1
-
-        if not warnings and not _ends_with_trailer(path):
-            warnings.append("The file appears to be truncated (missing GIF trailer).")
+                has_alpha = bool((canvas[:, :, 3] < 255).any())
+            cache.put(i, _to_image(canvas))
+            comp.dispose(canvas, f, saved)
+            metas.append(FrameMeta(i, f.delay_ms, _effective_delay(f.delay_ms), f.disposal))
 
         meta = SourceMeta(
             path=path,
             width=width,
             height=height,
-            frame_count=len(frames),
-            loop=loop,
-            frames=tuple(frames),
+            frame_count=len(metas),
+            loop=parsed.loop,
+            frames=tuple(metas),
             has_transparency=has_alpha,
         )
-        return cls(im, meta, warnings, cache, limits)
+        return cls(fp, parsed, meta, cache, (len(metas) - 1, canvas))
 
     # ------------------------------------------------------------- accessors
     @property
@@ -259,28 +540,54 @@ class GifSource:
         with self._lock:
             img = self._cache.get(i)
             if img is None:
-                img = self._decode(i)
+                img = self._render(i)
             return img.copy()
 
-    def _decode(self, i: int) -> Image.Image:
-        im = self._im
-        if im is None:
+    def _resume_point(self, i: int) -> tuple[int, np.ndarray]:
+        """Pick the latest known canvas state from which frame ``i`` can be composited.
+
+        Returns (first frame to draw, canvas before drawing it) — the canvas is a fresh array.
+        """
+        start, canvas = 0, None
+        k = self._cache.nearest_checkpoint(i)
+        if k is not None:
+            start, canvas = k, self._cache.checkpoints[k]
+        if self._last is not None and start <= self._last[0] < i:
+            start, canvas = self._last[0] + 1, self._last[1]
+        for j in range(i - 1, start - 1, -1):
+            f = self._frames[j]
+            img = self._cache.lru.get(j)
+            if img is not None and f.disposal != 3:
+                arr = np.array(img, dtype=np.uint8)
+                self._comp.dispose(arr, f, None)
+                return j + 1, arr
+        return start, (canvas.copy() if canvas is not None else self._comp.blank())
+
+    def _render(self, i: int) -> Image.Image:
+        fp = self._fp
+        if fp is None:
             raise ValueError("GifSource is closed")
-        try:
-            with _rgb_always():
-                start = im.tell()
-                if i < start:
-                    im.seek(0)
-                    start = 0
-                    if self._cache.is_keyframe(0) and self._cache.get(0) is None:
-                        self._cache.put(0, im.convert("RGBA"))
-                for f in range(start + 1, i + 1):
-                    im.seek(f)
-                    if f != i and self._cache.is_keyframe(f) and self._cache.get(f) is None:
-                        self._cache.put(f, im.convert("RGBA"))
-                img = im.convert("RGBA")
-        except _DECODE_ERRORS as e:
-            raise GifLoadError(f"Failed to decode frame {i}: {e}") from e
+        start, canvas = self._resume_point(i)
+        # Also cache the frames just before ``i`` (half of the free LRU room) so scrubbing
+        # backwards turns into cache hits instead of re-compositing from the checkpoint.
+        keep_from = i - self._cache.lru_capacity() // 2
+        img: Image.Image | None = None
+        for n in range(start, i + 1):
+            f = self._frames[n]
+            try:
+                fp.seek(f.data_start)
+                idx, written = _decode_indices(f, fp.read(f.data_end - f.data_start))
+            except _DECODE_ERRORS as e:
+                raise GifLoadError(f"Failed to decode frame {n}: {e}") from e
+            self._cache.put_checkpoint(n, canvas)
+            saved = self._comp.draw(canvas, f, idx, written)
+            if n == i:
+                img = _to_image(canvas)
+            elif n >= keep_from and self._cache.lru.get(n) is None:
+                self._cache.put(n, _to_image(canvas))
+            self._comp.dispose(canvas, f, saved)
+        self._last = (i, canvas)
+        assert img is not None
         self._cache.put(i, img)
         return img
 
@@ -305,11 +612,12 @@ class GifSource:
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:
         with self._lock:
-            if self._im is not None:
-                self._im.close()
-                self._im = None
+            if self._fp is not None:
+                self._fp.close()
+                self._fp = None
             self._cache.clear()
             self._thumbs.clear()
+            self._last = None
 
     def __enter__(self) -> GifSource:
         return self
@@ -328,12 +636,3 @@ def _partial_warning(i: int, e: BaseException) -> str:
         f"Frame {i + 1} could not be decoded ({e}); the file may be truncated or corrupt. "
         f"Loaded the first {i} frame(s)."
     )
-
-
-def _ends_with_trailer(path: Path) -> bool:
-    try:
-        with path.open("rb") as fh:
-            fh.seek(-1, 2)
-            return fh.read(1) == b";"
-    except OSError:
-        return True

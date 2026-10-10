@@ -5,11 +5,14 @@ from pathlib import Path
 import pytest
 from PIL import GifImagePlugin, Image
 
+from corpus import normalize_rgba
 from gif_editor.core.decoder import FrameMeta, GifLoadError, GifSource, Limits, SourceMeta
 from tests.gifgen import PALETTE, make_gif, solid_frames
 
 
 def _reference(path: Path, i: int) -> Image.Image:
+    """Pillow's compositing. Only valid as a reference for GIFs whose frames are all opaque
+    full-canvas images (there Pillow and browsers agree); corpus tests cover the rest."""
     with Image.open(path) as im:
         im.seek(i)
         return im.convert("RGBA")
@@ -73,6 +76,7 @@ def test_frame_colours(gif: Path):
 
 
 def test_frames_match_pillow(tmp_path: Path):
+    # Opaque full-canvas frames: no Pillow/browser disposal discrepancy, so they must agree.
     p = make_gif(tmp_path / "m.gif", _moving_frames(12), disposal=[1, 2, 0] * 4)
     with GifSource.open(p) as src:
         for i in range(12):
@@ -160,7 +164,9 @@ def test_transparency_detected(tmp_path: Path):
         assert src.frame(0).getpixel((8, 8)) == (*PALETTE[1], 255)
         assert src.meta.frame_count == 3
         for i in range(3):
-            assert src.frame(i).tobytes() == _reference(p, i).tobytes()
+            # Frame 0 has a transparency index, so Pillow composites with alpha too; the RGB
+            # of transparent pixels is irrelevant.
+            assert normalize_rgba(src.frame(i)) == normalize_rgba(_reference(p, i))
 
 
 def test_truncated_file_partial_load(tmp_path: Path):
