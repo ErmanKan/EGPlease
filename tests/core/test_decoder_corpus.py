@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 import random
+import subprocess
+import sys
+import textwrap
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -248,6 +252,178 @@ def test_gif87a_without_extensions(tmp_path: Path):
         assert src.meta.loop is None and src.meta.frames[0].delay_ms == 0
         assert src.meta.frames[0].disposal == 0
         _assert_frames(src, C.compose(spec))
+
+
+# --- per-frame size limits (memory DoS) ---------------------------------------------------
+
+
+def _descriptor_bomb(
+    fw: int, fh: int, *, good_first: bool = False, interlace: bool = False
+) -> bytes:
+    """Tiny file: 10x10 canvas, 2-colour GCT, a frame *declaring* ``fw x fh``, minimal LZW."""
+    out = bytearray(b"GIF89a" + C._u16(10) + C._u16(10) + bytes([0x80, 0, 0]))
+    out += bytes([0, 0, 0, 255, 255, 255])
+    if good_first:
+        out += b"\x2c" + C._u16(0) + C._u16(0) + C._u16(10) + C._u16(10) + b"\x00\x02"
+        out += C._sub_blocks(C.lzw_encode(bytes(100), 2))
+    out += b"\x2c" + C._u16(0) + C._u16(0) + C._u16(fw) + C._u16(fh)
+    out += bytes([0x40 if interlace else 0]) + b"\x02"
+    out += b"\x02\x44\x01\x00"  # clear, 0, end -> one pixel then EOI
+    return bytes(out) + b"\x3b"
+
+
+@pytest.mark.parametrize(
+    ("fw", "fh", "limits", "match"),
+    [
+        (16000, 16000, Limits(), "maximum side"),
+        (8000, 8000, Limits(), "far larger"),  # side OK, 64 Mpx on a 10x10 canvas
+        (16000, 16000, Limits(max_canvas_side=100_000), "too large"),  # > 2 * bomb limit
+        (16000, 2000, Limits(max_canvas_side=100_000), "far larger"),
+    ],
+)
+def test_huge_frame_descriptor_rejected_fast_and_small(
+    tmp_path: Path, fw: int, fh: int, limits: Limits, match: str
+):
+    path = tmp_path / "bomb.gif"
+    path.write_bytes(_descriptor_bomb(fw, fh))
+    assert path.stat().st_size < 64
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    try:
+        with pytest.raises(GifLoadError, match=match):
+            GifSource.open(path, limits)
+        elapsed = time.perf_counter() - t0
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert elapsed < 1.0
+    assert peak < 100 * 2**20, f"peak {peak / 2**20:.1f} MiB"
+
+
+def test_huge_frame_after_good_frames_still_rejected(tmp_path: Path):
+    path = tmp_path / "bomb2.gif"
+    path.write_bytes(_descriptor_bomb(8000, 8000, good_first=True))
+    with pytest.raises(GifLoadError, match="Frame 2"):
+        GifSource.open(path)
+
+
+def test_frame_within_slack_is_accepted(tmp_path: Path):
+    # 40x40 = 16x the 10x10 canvas area, but far below 16 Mpx: allowed and clipped.
+    path = tmp_path / "ok.gif"
+    path.write_bytes(_descriptor_bomb(40, 40, good_first=True))
+    with GifSource.open(path) as src:
+        assert src.meta.frame_count == 2
+        assert src.frame(1).getpixel((0, 0)) == (0, 0, 0, 255)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="resource module is POSIX-only")
+def test_descriptor_bomb_peak_rss_in_subprocess(tmp_path: Path):
+    """Real RSS (Pillow's C allocations are invisible to tracemalloc): the review's repro."""
+    path = tmp_path / "bomb.gif"
+    path.write_bytes(_descriptor_bomb(16000, 16000))
+    code = textwrap.dedent(
+        f"""
+        import resource, sys
+        from gif_editor.core.decoder import GifLoadError, GifSource, Limits
+        base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        for limits in (Limits(), Limits(max_canvas_side=100_000)):
+            try:
+                GifSource.open({str(path)!r}, limits).frame(0)
+                sys.exit("no error")
+            except GifLoadError:
+                pass
+        print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base)
+        """
+    )
+    src_dir = Path(__file__).resolve().parents[2] / "src"
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PYTHONPATH": str(src_dir)},
+        check=True,
+    )
+    grown_kib = int(out.stdout.strip())
+    assert grown_kib < 100 * 1024, f"RSS grew by {grown_kib} KiB"
+
+
+def test_off_canvas_frame_is_not_decoded(tmp_path: Path):
+    # The off-canvas frame has invalid LZW data; it is never decoded, so no warning.
+    spec = GifSpec(
+        6,
+        4,
+        [
+            FrameSpec(6, 4, C.diag(6, 4)),
+            FrameSpec(3, 3, C.solid(3, 3, 2), left=50, top=1, delay_cs=33),
+            FrameSpec(2, 2, C.solid(2, 2, 3), left=1, top=1),
+        ],
+    )
+    data, offsets = C.encode_gif(spec)
+    end = offsets[1]
+    while data[end]:
+        end += data[end] + 1
+    data = data[: offsets[1]] + bytes([2, 0xFF, 0xFF, 0]) + data[end + 1 :]  # corrupt LZW
+    path = tmp_path / "off.gif"
+    path.write_bytes(data)
+    with GifSource.open(path) as src:
+        assert src.meta.frame_count == 3
+        assert src.meta.frames[1].delay_ms == 330
+        assert src.warnings == []
+        _assert_frames(src, C.compose(spec))
+
+
+@pytest.mark.parametrize("interlace", [False, True])
+def test_frame_larger_than_canvas_matches_reference(tmp_path: Path, interlace: bool):
+    spec = GifSpec(
+        5,
+        6,
+        [
+            FrameSpec(5, 6, C.solid(5, 6, 1)),
+            FrameSpec(9, 21, C.diag(9, 21), left=1, top=2, interlace=interlace, disposal=2),
+            FrameSpec(3, 3, C.solid(3, 3, 4), left=3, top=4, interlace=interlace),
+        ],
+    )
+    with GifSource.open(_write(tmp_path, spec)) as src:
+        assert src.warnings == []
+        _assert_frames(src, C.compose(spec))
+
+
+@pytest.mark.parametrize("interlace", [False, True])
+@pytest.mark.parametrize("n_written", [1, 7, 13, 26, 40, 61])
+def test_short_lzw_partially_off_canvas(tmp_path: Path, interlace: bool, n_written: int):
+    """Short data in a frame larger than the canvas: exactly the decoded prefix is painted.
+
+    The prefix ends with index 0 pixels (``diag`` wraps), exercising the 0/255 refill logic.
+    """
+    cw, ch, fw, fh = 5, 6, 7, 11
+    full = C.diag(fw, fh)
+    rows = C.interlace_order(fh) if interlace else list(range(fh))
+    stored = b"".join(full[r * fw : (r + 1) * fw] for r in rows)
+    spec = GifSpec(
+        cw,
+        ch,
+        [FrameSpec(cw, ch, C.solid(cw, ch, 6)), FrameSpec(fw, fh, full, interlace=interlace)],
+    )
+    data, offsets = C.encode_gif(spec)
+    end = offsets[1]
+    while data[end]:
+        end += data[end] + 1
+    blocks = C._sub_blocks(C.lzw_encode(stored[:n_written], 3))
+    path = tmp_path / "short.gif"
+    path.write_bytes(data[: offsets[1]] + blocks + data[end + 1 :])
+    # Expected: written pixel positions in decode order map back to (x, y).
+    written = {(k % fw, rows[k // fw]) for k in range(n_written)}
+    with GifSource.open(path) as src:
+        # Non-interlaced rows below the canvas are not decoded, so data that covers every
+        # visible row counts as complete (no warning), like the pixels a browser shows.
+        partial = interlace or n_written < fw * ch
+        assert any("incomplete" in m for m in src.warnings) == partial
+        img = src.frame(1)
+        for y in range(ch):
+            for x in range(cw):
+                want = C.PAL8[full[y * fw + x]] if (x, y) in written else C.PAL8[6]
+                assert img.getpixel((x, y)) == (*want, 255), (x, y)
 
 
 def test_open_performance_500x500x200(tmp_path: Path):

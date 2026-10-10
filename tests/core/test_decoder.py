@@ -1,3 +1,4 @@
+import os
 import random
 import threading
 from pathlib import Path
@@ -249,3 +250,40 @@ def test_close_and_context_manager(gif: Path):
     src.close()  # idempotent
     with GifSource.open(gif) as s2:
         assert s2.frame(0).size == (16, 12)
+
+
+def _open_fds_to(path: Path) -> list[str]:
+    fd_dir = Path("/proc/self/fd")
+    out = []
+    for fd in fd_dir.iterdir():
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        if target == str(path.resolve()):
+            out.append(target)
+    return out
+
+
+def test_source_file_released_after_open(tmp_path: Path):
+    p = make_gif(tmp_path / "src.gif", _moving_frames(6))
+    refs = [_reference(p, i).tobytes() for i in range(6)]
+    other = make_gif(tmp_path / "other.gif", solid_frames(2))
+    with GifSource.open(p, Limits(cache_budget_bytes=0)) as src:
+        if Path("/proc/self/fd").is_dir():
+            assert _open_fds_to(p) == []
+        os.replace(other, p)  # "save over the source" (fails on Windows with an open handle)
+        assert p.read_bytes() != b""
+        p.unlink()
+        assert not p.exists()
+        # Still decodes the ORIGINAL frames from memory (cache disabled -> real decode).
+        for i in (5, 0, 3):
+            assert src.frame(i).tobytes() == refs[i]
+        assert src.thumbnail(2, 8).size == (8, 6)
+
+
+def test_frame_after_close_raises(gif: Path):
+    src = GifSource.open(gif, Limits(cache_budget_bytes=0))
+    src.close()
+    with pytest.raises(ValueError, match="closed"):
+        src.frame(1)
