@@ -20,6 +20,7 @@ boundary and every signal is emitted on the GUI thread, so no QPixmap is ever bu
 
 from __future__ import annotations
 
+import contextlib
 from collections import OrderedDict
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -29,7 +30,6 @@ from gif_editor.core import pipeline
 from gif_editor.core.models import CropRect, EditState, OutputSize
 from gif_editor.core.render import render_frame
 from gif_editor.ui.document import Document
-from gif_editor.ui.inspector.player import Player
 from gif_editor.ui.qt_image import pil_to_qimage
 from gif_editor.ui.workers import run_async
 
@@ -51,10 +51,8 @@ class PreviewService(QObject):
     invalidates the previews rendered with the old crop/size and re-schedules the debounced
     estimate, and ``currentIndexChanged`` asks for the new frame while geometry is on.
 
-    ``player`` is optional and only consulted for the estimate: while the user previews the
-    edited timing (``Player.preview_edits``) the plan is derived from the same immutable
-    ``EditState``, so a frame-count change during playback is the player's business, not a
-    state change, and must not trigger a recomputation. Tests pass one to pin that down.
+    It changes nothing in the document; it only reads it. The canvas draws whatever
+    ``frameReady`` hands it, and the summary card shows ``estimated_bytes``.
     """
 
     #: A rendered (or cached) preview frame is ready: ``(source index, frame as QImage)``.
@@ -63,7 +61,7 @@ class PreviewService(QObject):
     frameFailed = Signal(int, str)
     #: The estimate changed value, was invalidated, or a computation started.
     estimateChanged = Signal()
-    #: A fresh estimate finished and ``estimated_bytes`` holds its value.
+    #: A fresh estimate finished (``estimated_bytes`` holds its value) or was already known.
     estimateReady = Signal()
     #: ``geometry_enabled`` changed.
     geometryChanged = Signal(bool)
@@ -73,16 +71,18 @@ class PreviewService(QObject):
         doc: Document,
         parent: QObject | None = None,
         *,
-        player: Player | None = None,
         cache_size: int = DEFAULT_CACHE_SIZE,
         debounce_ms: int = ESTIMATE_DEBOUNCE_MS,
     ) -> None:
-        """Bind the service to ``doc``. ``cache_size`` / ``debounce_ms`` are test hooks."""
+        """Bind the service to ``doc``. ``cache_size`` and ``debounce_ms`` are test hooks.
+
+        Raises ``ValueError`` for ``cache_size < 1``. If ``doc`` already has a source open
+        (a service created after the file was loaded) the first estimate is scheduled here.
+        """
         super().__init__(parent)
         if cache_size < 1:
             raise ValueError("cache_size must be >= 1")
         self._doc = doc
-        self._player = player
         self._cache_size = int(cache_size)
         self._debounce_ms = max(0, int(debounce_ms))
 
@@ -100,7 +100,7 @@ class PreviewService(QObject):
 
         # Render side: at most one worker at a time, remembering only the newest index.
         self._render_in_flight = False
-        self._pending: int | None = None  # latest index wanted while a render was running
+        self._pending: int | None = None  # newest index wanted while a render was running
 
         # Estimate side.
         self._estimate: int | None = None
@@ -118,7 +118,7 @@ class PreviewService(QObject):
         doc.currentIndexChanged.connect(self._on_current_index_changed)
 
         if doc.source is not None:
-            self.refresh_estimate()  # a document opened before us still gets a size
+            self.refresh_estimate()
 
     # ---------------------------------------------------------- geometry mode
     @property
@@ -237,10 +237,9 @@ class PreviewService(QObject):
             (self._doc.stateChanged, self._on_state_changed),
             (self._doc.currentIndexChanged, self._on_current_index_changed),
         ):
-            try:
+            with contextlib.suppress(RuntimeError, TypeError):
+                # Already gone (Qt) or never connected.
                 signal.disconnect(slot)
-            except (RuntimeError, TypeError):  # already gone (Qt) or never connected
-                pass
 
     # ------------------------------------------------------- render internals
     def _cache_key(self, src_index: int) -> CacheKey | None:
@@ -251,10 +250,11 @@ class PreviewService(QObject):
         return (src_index, state.crop, state.size)
 
     def _render(self, source: object, src_index: int) -> QImage:
-        """Worker half: Pillow frame in, ``QImage`` out. Never touches the cache or a pixmap.
+        """Pillow frame in, ``QImage`` out — never a QPixmap, never a cache write.
 
-        The cache is GUI-thread-only state, and mutating an ``OrderedDict`` from a pool
-        thread while the GUI thread reads it would be a genuine data race.
+        This is the function that runs on the pool thread, so it touches the cache (GUI-thread
+        state) not at all: mutating an ``OrderedDict`` on a worker while the GUI thread reads
+        it would be a real data race. The caller caches the result back on the GUI thread.
         """
         image = source.frame(src_index)  # type: ignore[attr-defined]
         if self._geometry:
@@ -324,6 +324,7 @@ class PreviewService(QObject):
             # Exactly this state was already measured (a re-applied or reverted edit):
             # keep the value and just stop showing "calculating".
             self._estimate_pending = False
+            self.estimateReady.emit()
             return
         try:
             timeline = self._doc.plan()
@@ -346,11 +347,11 @@ class PreviewService(QObject):
         """Worker half: ``estimate_size`` for one fixed source/state/timeline.
 
         Any failure becomes ``None`` (the UI then draws no size line) instead of
-        propagating; the same guard covers a ``ValueError`` from an unusable plan.
+        propagating; ``run_async`` also routes a raised exception to the same ``None``.
         """
         try:
             return int(pipeline.estimate_size(source, state, timeline))  # type: ignore[arg-type]
-        except Exception:  # noqa: BLE001 - an estimate must never raise into the caller
+        except Exception:  # an estimate must never raise into the caller
             return None
 
     def _on_estimate_ready(self, generation: int, value: object) -> None:
@@ -394,9 +395,9 @@ class PreviewService(QObject):
         current = state if isinstance(state, EditState) else self._doc.state
         geometry = (current.crop, current.size)
         if geometry != self._last_geometry:
-            # Only the crop/size affect a rendered preview; drop every image produced with
+            # Only the crop/size affect a rendered preview. Drop every image produced with
             # the previous geometry (the new one has its own cache keys) and re-render the
-            # frame on screen so the canvas never shows the old crop.
+            # frame on screen, so the canvas never shows the old crop.
             for existing in [k for k in self._cache if (k[1], k[2]) != geometry]:
                 self._cache.pop(existing, None)
             self._last_geometry = geometry
