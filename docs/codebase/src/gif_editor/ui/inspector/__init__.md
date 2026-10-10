@@ -24,7 +24,7 @@ An empty package. Its modules are being written in Milestone 2 by parallel worke
 | `player.py` | in progress | playback timer that advances `Document.current_index` |
 | `inspector.py` | planned (orchestrator) | composes the widgets above into the right panel |
 
-See [`docs/03-architecture.md`](../../../../../03-architecture.md#m2-widgets-in-progress) for how they connect to `Document`.
+See [`docs/03-architecture.md`](../../../../../03-architecture.md#9-m2-widgets-in-progress) for how they connect to `Document`.
 
 ## Invariants & gotchas
 - Widget rules (AGENTS.md): construct with `(doc, parent=None)`; talk only to `Document`; refresh on `sourceChanged`; show an empty or disabled state when nothing is open; never block the GUI thread for more than about 16 ms.
