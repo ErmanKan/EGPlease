@@ -10,17 +10,38 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv if argv is None else argv)
+    # Headless one-shot edit (packaging smoke test, scripting): no window, and no Qt at all.
+    # Importing Qt loads a platform plugin (needs a display or an offscreen setup), and this
+    # path must work on a bare server, so it is handled before anything imports Qt.
+    if "--edit-spec" in args:
+        i = args.index("--edit-spec")
+        try:
+            source, spec = args[i + 1], args[i + 2]
+        except IndexError:
+            print("usage: GifEditor --edit-spec IN.gif SPEC")
+            return 2
+        from gif_editor.headless import run_edit_spec
+
+        return run_edit_spec(source, spec)
+
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from gif_editor import __version__
     from gif_editor.core.selftest import SelfTestError, run_selftest
+    from gif_editor.resources import icon_path
     from gif_editor.ui.main_window import APP_NAME, MainWindow
 
-    args = list(sys.argv if argv is None else argv)
     app = QApplication.instance() or QApplication(args)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
+    # Window/taskbar icon. Inside a onefile build the icon is also embedded in the
+    # executable's Windows resource, but that only covers Explorer, not the running window.
+    icon = icon_path()
+    if icon is not None:
+        app.setWindowIcon(QIcon(str(icon)))
 
     # We rely on undocumented Pillow internals (pinned version). Fail loudly, not subtly.
     try:
