@@ -10,6 +10,10 @@ export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # which at QT_SCALE_FACTOR=2 is 400x400 logical: smaller than the test windows, so mouse
 # events past x=400 were never delivered. See scripts/test-hidpi.sh.
 export QT_QPA_PLATFORM="offscreen:configfile=$PWD/scripts/offscreen-screen.json"
+# Keep test files inside the project (gitignored out/) rather than the container's /tmp:
+# --basetemp moves pytest's tmp_path there. --capture=sys captures output in memory; the
+# default (fd) capture uses deleted-while-open temp files, which the F: drive mount
+# rejects, so pointing TMPDIR at the project is not an option.
 .venv/bin/ruff format --check .
 .venv/bin/ruff check .
-exec .venv/bin/python -m pytest -q "$@"
+exec .venv/bin/python -m pytest -q --capture=sys --basetemp="$PWD/out/pytest-tmp" "$@"

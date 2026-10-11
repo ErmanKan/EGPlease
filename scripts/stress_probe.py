@@ -10,7 +10,6 @@ was blocked (the window would look frozen for that long).
 from __future__ import annotations
 
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -76,7 +75,8 @@ def make_big(path: Path, w: int, h: int, n: int) -> Path:
 
 
 def main() -> None:
-    d = Path(tempfile.mkdtemp())
+    d = Path(__file__).resolve().parent.parent / "out" / "stress"  # inside the project
+    d.mkdir(parents=True, exist_ok=True)
     meter = StallMeter()
     w = MainWindow()
     w.resize(1300, 820)

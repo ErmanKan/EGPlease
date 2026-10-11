@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 _live: set[_Relay] = set()  # keeps relays alive until their task reports back
 _lock = threading.Lock()
@@ -27,11 +27,18 @@ class _Relay(QObject):
 
 
 class _Runnable(QRunnable):
-    def __init__(self, fn: Callable[..., Any], relay: _Relay, with_progress: bool) -> None:
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        relay: _Relay,
+        with_progress: bool,
+        exited: threading.Event,
+    ) -> None:
         super().__init__()
         self._fn = fn
         self._relay = relay
         self._with_progress = with_progress
+        self._exited = exited
 
     def run(self) -> None:  # executes on a pool thread
         try:
@@ -45,6 +52,12 @@ class _Runnable(QRunnable):
             traceback.print_exc()
         else:
             self._relay.finished.emit(result)
+        finally:
+            # The GUI thread may run the callback (and want to delete the relay) before
+            # emit() above has returned here. Deleting a QObject while another thread is
+            # inside one of its emits is undefined behaviour, so the relay is only deleted
+            # once this flag says the worker has let go of it (see ``_release``).
+            self._exited.set()
 
 
 def run_async(
@@ -61,10 +74,16 @@ def run_async(
     ``progress(done, total=None)`` may be called from the worker thread.
     """
     relay = _Relay()
+    exited = threading.Event()
     with _lock:
         _live.add(relay)
 
     def _release() -> None:
+        if not exited.is_set():
+            # The worker is still returning from emit(): try again shortly. This is a
+            # window of microseconds, so it almost never loops more than once.
+            QTimer.singleShot(1, _release)
+            return
         with _lock:
             _live.discard(relay)
         relay.deleteLater()
@@ -89,5 +108,5 @@ def run_async(
     relay.finished.connect(_done)
     relay.failed.connect(_fail)
     (pool or QThreadPool.globalInstance()).start(
-        _Runnable(fn, relay, with_progress=on_progress is not None)
+        _Runnable(fn, relay, with_progress=on_progress is not None, exited=exited)
     )
