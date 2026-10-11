@@ -16,4 +16,13 @@ export QT_QPA_PLATFORM="offscreen:configfile=$PWD/scripts/offscreen-screen.json"
 # rejects, so pointing TMPDIR at the project is not an option.
 .venv/bin/ruff format --check .
 .venv/bin/ruff check .
-exec .venv/bin/python -m pytest -q --capture=sys --basetemp="$PWD/out/pytest-tmp" "$@"
+# One temp folder per run: pytest empties --basetemp when it starts, so a shared folder
+# breaks any test run happening at the same time (two terminals, parallel workers).
+# Folders of runs that have exited are removed here.
+TMPROOT="$PWD/out/pytest-tmp"
+mkdir -p "$TMPROOT"
+for d in "$TMPROOT"/run-*; do
+  [ -d "$d" ] || continue
+  kill -0 "${d##*/run-}" 2>/dev/null || rm -rf "$d"
+done
+exec .venv/bin/python -m pytest -q --capture=sys --basetemp="$TMPROOT/run-$$" "$@"

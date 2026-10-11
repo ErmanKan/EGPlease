@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
 from PySide6.QtGui import QDropEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from gif_editor.core.encoder import read_back
 from gif_editor.core.models import CropRect
@@ -254,3 +254,50 @@ def test_app_main_runs_selftest_and_window(qtbot, monkeypatch, gif_path):
     assert created["windows"]
     for w in created["windows"]:
         w.close()
+
+
+def test_close_during_generate_cancels_then_closes(qtbot, win, gif_path, tmp_path, monkeypatch):
+    """One click on X: Generate is cancelled, nothing is written, then the window closes."""
+    import threading
+
+    from gif_editor.ui import main_window
+
+    _open(qtbot, win, gif_path)
+    started = threading.Event()
+    real = main_window.generate
+
+    def slow(source, state, path, progress=None, cancel=None):
+        started.set()
+        assert cancel.wait(10)  # behave like a long Generate that notices the cancel
+        return real(source, state, path, progress=progress, cancel=cancel)
+
+    monkeypatch.setattr(main_window, "generate", slow)
+    out = tmp_path / "out.gif"
+    win.generate_to(out)
+    assert started.wait(5)
+    assert not win.close()  # the first close is deferred, not refused
+    assert win.isVisible() and "then closing" in win.statusBar().currentMessage()
+    qtbot.waitUntil(lambda: not win.isVisible(), timeout=10_000)
+    assert not win.is_busy and not out.exists()
+
+
+def test_window_fits_small_screen_and_generate_stays_visible(qtbot, monkeypatch):
+    """1080p at 150 % is 1280x720 logical: the window must fit, Generate must be on screen."""
+    from PySide6.QtCore import QRect
+
+    from gif_editor.ui.main_window import MainWindow
+
+    monkeypatch.setattr(
+        type(QApplication.primaryScreen()), "availableGeometry", lambda _s: QRect(0, 0, 1280, 680)
+    )
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    assert w.width() <= 1280 and w.height() <= 680
+    assert w.x() >= 0 and w.y() >= 0
+    gen = w.settings.generate_button
+    # Not inside the scroll area, and fully inside the window.
+    assert not w.findChild(QScrollArea).isAncestorOf(gen)
+    top_left = gen.mapTo(w, gen.rect().topLeft())
+    assert w.rect().contains(QRect(top_left, gen.size()))

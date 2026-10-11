@@ -33,4 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     win.show()
     if len(args) > 1:
         win.open_file(args[1])
-    return app.exec()
+    code = app.exec()
+    # A background task (opening a file, a preview render, the size estimate) may still be
+    # running when the window closes. Let it finish before Python shuts down: interpreter
+    # teardown under a running pool thread can crash on exit. Tasks are short; the timeout
+    # only guards against a hang.
+    from PySide6.QtCore import QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(10_000)
+    return code

@@ -15,9 +15,10 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QScrollArea,
     QSplitter,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
         self.last_result: GenerateResult | None = None
         self._loading = False
         self._generating = False
+        self._close_when_idle = False  # close requested during Generate: close after cancel
         self._cancel: threading.Event | None = None
         self._progress: QProgressDialog | None = None
 
@@ -87,8 +90,19 @@ class MainWindow(QMainWindow):
         # The draggable crop rectangle lives in the canvas scene (scene = image pixels).
         self.crop_item = CropItem(self.doc)
         self.inspector.canvas.scene().addItem(self.crop_item)
+        # Generate sits under the scroll area, not inside it: it is the main action and
+        # must stay visible however short the screen is (at 150 % on a 1080p laptop the
+        # settings column scrolls). The panel still owns the button and its signal.
+        gen = self.settings.generate_button
+        self.settings.layout().removeWidget(gen)
+        left = QWidget()
+        left_box = QVBoxLayout(left)
+        left_box.setContentsMargins(0, 0, 0, 6)
+        left_box.setSpacing(6)
+        left_box.addWidget(scroll, 1)
+        left_box.addWidget(gen)
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(scroll)
+        splitter.addWidget(left)
         splitter.addWidget(self.inspector)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -102,7 +116,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._connect()
         self.setAcceptDrops(True)  # the canvas refuses drops so they bubble up here
-        self.resize(1300, 820)
+        self._fit_to_screen()
         self._refresh_title()
         self._refresh_enabled()
 
@@ -269,6 +283,26 @@ class MainWindow(QMainWindow):
         if hasattr(self, "crop_item"):  # not yet created during __init__
             self._update_crop_tool()
         self.act_open.setEnabled(not self._loading and not self._generating)
+
+    # ---------------------------------------------------------------- layout
+    PREFERRED_SIZE = (1300, 820)  # logical px; comfortable on a 1080p screen at 100 %
+
+    def _fit_to_screen(self) -> None:
+        """Open at the preferred size, but never larger than 90 % of the screen, centred.
+
+        Windows scaling shrinks the screen in logical pixels: a 1920x1080 laptop at 150 %
+        (the most common setup) is only 1280x720, so a fixed 1300x820 window would open with
+        its bottom edge, the Generate area included, off-screen.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:  # no display at all (should not happen); keep Qt's default
+            self.resize(*self.PREFERRED_SIZE)
+            return
+        avail = screen.availableGeometry()
+        w = min(self.PREFERRED_SIZE[0], int(avail.width() * 0.9))
+        h = min(self.PREFERRED_SIZE[1], int(avail.height() * 0.9))
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2, avail.y() + (avail.height() - h) // 2)
 
     # ---------------------------------------------------------------- errors
     def show_error(self, message: str, title: str = "GIF Editor") -> None:
@@ -473,6 +507,10 @@ class MainWindow(QMainWindow):
                 self._progress.deleteLater()
                 self._progress = None
             self._refresh_enabled()
+            if self._close_when_idle:
+                # The user closed the window during Generate; the cancel has now landed
+                # (or Generate finished first). Finish the close they asked for.
+                QTimer.singleShot(0, self.close)
 
         def done(result: GenerateResult) -> None:
             finish()
@@ -543,10 +581,13 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- close
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._generating:
-            # Cancel cleanly; the encoder deletes its temp file. Close once it reports back.
+            # Cancel cleanly (the encoder deletes its temp file) and close by itself once
+            # the worker reports back; see ``finish`` in ``generate_to``. The window stays
+            # open for that moment so nothing is torn down under a running worker.
             self.cancel_generate()
+            self._close_when_idle = True
             event.ignore()
-            self.statusBar().showMessage("Cancelling Generate\u2026 close again in a moment.")
+            self.statusBar().showMessage("Cancelling Generate, then closing\u2026")
             return
         self.player.pause()
         self.doc.close()
