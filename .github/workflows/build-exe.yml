@@ -1,0 +1,51 @@
+name: Build GifEditor.exe
+
+# Nuitka cannot cross-compile, so the Windows executable is built on a Windows runner.
+# Trigger it by hand (Actions -> Build GifEditor.exe -> Run workflow) or on a version tag.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip install -r packaging/build-requirements.txt
+
+      - name: Lint and test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          ruff format --check .
+          ruff check .
+          python -m pytest -q
+
+      - name: Regenerate the icon (fails if the committed icon is stale)
+        run: |
+          python scripts/make_icon.py
+          git diff --exit-code -- src/gif_editor/resources/icons
+
+      - name: Build the single-file executable
+        run: python scripts/build.py
+
+      - name: Smoke-test the built executable
+        run: python scripts/smoke_build.py out/dist/GifEditor.exe
+
+      - name: Upload the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: GifEditor-windows
+          path: out/dist/GifEditor.exe
+          if-no-files-found: error
+          retention-days: 30

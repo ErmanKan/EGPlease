@@ -1,0 +1,7 @@
+# Build-only dependencies, installed by .github/workflows/build-exe.yml and by anyone
+# building the .exe locally: `python -m pip install -r packaging/build-requirements.txt`.
+# Pinned exactly, like the runtime requirements.
+nuitka==4.3
+ordered-set==4.1.0
+zstandard==0.25.0
+patchelf==0.19.1.0; sys_platform != "win32"  # Nuitka onefile needs it on Linux/macOS only
