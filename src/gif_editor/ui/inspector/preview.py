@@ -159,7 +159,7 @@ class PreviewService(QObject):
             if cached is not None:
                 self._cache.move_to_end(key)
                 return cached
-        image = self._render(source, src_index)
+        image = self._render(source, src_index, self._geometry_snapshot())
         if key is not None:
             self._cache_put(key, image)
         return image
@@ -186,10 +186,11 @@ class PreviewService(QObject):
                 QTimer.singleShot(0, lambda: self._deliver(index, cached))
                 return
         source = self._doc.source
+        geometry = self._geometry_snapshot()  # captured now: the worker must not read live state
         self._render_in_flight = True
         generation = self._render_gen
         run_async(
-            lambda: self._render(source, index),
+            lambda: self._render(source, index, geometry),
             on_done=lambda image: self._on_rendered(index, key, generation, image),
             on_error=lambda message, _exc: self._on_render_error(index, generation, message),
         )
@@ -249,17 +250,31 @@ class PreviewService(QObject):
         state = self._doc.state
         return (src_index, state.crop, state.size)
 
-    def _render(self, source: object, src_index: int) -> QImage:
-        """Pillow frame in, ``QImage`` out — never a QPixmap, never a cache write.
+    def _geometry_snapshot(self) -> tuple[CropRect | None, OutputSize | None] | None:
+        """The crop/size to render with right now, or ``None`` for the plain source frame."""
+        if not self._geometry:
+            return None
+        state = self._doc.state
+        return (state.crop, state.size)
 
-        This is the function that runs on the pool thread, so it touches the cache (GUI-thread
-        state) not at all: mutating an ``OrderedDict`` on a worker while the GUI thread reads
-        it would be a real data race. The caller caches the result back on the GUI thread.
+    @staticmethod
+    def _render(
+        source: object,
+        src_index: int,
+        geometry: tuple[CropRect | None, OutputSize | None] | None,
+    ) -> QImage:
+        """Pillow frame in, ``QImage`` out: never a QPixmap, never a cache write.
+
+        This runs on a pool thread, so it is a static method that receives everything it needs
+        as arguments. It reads no ``PreviewService`` or ``Document`` attribute: the geometry was
+        captured on the GUI thread when the frame was requested. Reading the live state here
+        would let a crop change made mid-render leak into an image that is labelled with the
+        old request. The caller caches the result back on the GUI thread.
         """
         image = source.frame(src_index)  # type: ignore[attr-defined]
-        if self._geometry:
-            state = self._doc.state
-            image = render_frame(image, state.crop, state.size)
+        if geometry is not None:
+            crop, size = geometry
+            image = render_frame(image, crop, size)
         return pil_to_qimage(image)
 
     def _cache_put(self, key: CacheKey, image: QImage) -> None:
