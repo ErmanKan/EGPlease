@@ -32,6 +32,7 @@ from gif_editor.core.decoder import GifSource
 from gif_editor.core.encoder import Cancelled
 from gif_editor.core.pipeline import GenerateResult, export_frame_png, generate
 from gif_editor.ui.document import Document
+from gif_editor.ui.inspector.crop_item import CropItem
 from gif_editor.ui.inspector.inspector import Inspector
 from gif_editor.ui.inspector.player import Player
 from gif_editor.ui.inspector.preview import PreviewService
@@ -75,6 +76,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setMinimumWidth(self.settings.minimumSizeHint().width() + 24)
         self.inspector = Inspector(self.doc, self.player)
+        # The draggable crop rectangle lives in the canvas scene (scene = image pixels).
+        self.crop_item = CropItem(self.doc)
+        self.inspector.canvas.scene().addItem(self.crop_item)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(scroll)
         splitter.addWidget(self.inspector)
@@ -156,6 +160,32 @@ class MainWindow(QMainWindow):
         self.player.previewEditsChanged.connect(self.act_preview.setChecked)
         self.addAction(self.act_preview)
 
+        ci = self.crop_item
+        self.act_crop_tool = QAction("&Crop tool", self, checkable=True)
+        self.act_crop_tool.setShortcut(QKeySequence("C"))
+        self.act_crop_tool.setStatusTip("Show the crop rectangle on the frame (drag to crop)")
+        self.act_crop_tool.toggled.connect(self._on_crop_tool_toggled)
+        self.addAction(self.act_crop_tool)
+        self.act_crop_reset = self._action("Remove crop", ci.reset)
+        self.act_crop_nudge = [
+            self._action(f"Move crop {name}", lambda _=False, d=d: ci.nudge(*d), key)
+            for name, d, key in (
+                ("left", (-1, 0), "Ctrl+Left"),
+                ("right", (1, 0), "Ctrl+Right"),
+                ("up", (0, -1), "Ctrl+Up"),
+                ("down", (0, 1), "Ctrl+Down"),
+            )
+        ]
+        self.act_crop_resize = [
+            self._action(f"{name} crop", lambda _=False, d=d: ci.resize(*d), key)
+            for name, d, key in (
+                ("Narrow", (-1, 0), "Ctrl+Shift+Left"),
+                ("Widen", (1, 0), "Ctrl+Shift+Right"),
+                ("Shorten", (0, -1), "Ctrl+Shift+Up"),
+                ("Lengthen", (0, 1), "Ctrl+Shift+Down"),
+            )
+        ]
+
         cv = insp.canvas
         self.act_fit = self._action("Zoom to &fit", cv.zoom_fit, "Ctrl+0")
         self.act_actual = self._action("Actual &size (100%)", cv.zoom_actual, "Ctrl+1")
@@ -168,7 +198,8 @@ class MainWindow(QMainWindow):
             self.act_delete, self.act_restore, self.act_trim_in, self.act_trim_out,
             self.act_trim_reset, self.act_play, self.act_prev, self.act_next, self.act_prev10,
             self.act_next10, self.act_first, self.act_last, self.act_preview, self.act_fit,
-            self.act_actual, self.act_zoom_in, self.act_zoom_out,
+            self.act_actual, self.act_zoom_in, self.act_zoom_out, self.act_crop_tool,
+            self.act_crop_reset, *self.act_crop_nudge, *self.act_crop_resize,
         ]  # fmt: skip
 
     def _build_menus(self) -> None:
@@ -185,6 +216,10 @@ class MainWindow(QMainWindow):
         m.addActions([self.act_delete, self.act_restore])
         m.addSeparator()
         m.addActions([self.act_trim_in, self.act_trim_out, self.act_trim_reset])
+        m = mb.addMenu("&Crop")
+        m.addActions([self.act_crop_tool, self.act_crop_reset])
+        m.addSeparator()
+        m.addActions([*self.act_crop_nudge, *self.act_crop_resize])
         m = mb.addMenu("&Playback")
         m.addActions([self.act_play, self.act_preview])
         m.addSeparator()
@@ -202,6 +237,10 @@ class MainWindow(QMainWindow):
         self.inspector.transport.saveFrameRequested.connect(lambda: self.save_frame_dialog(False))
         self.inspector.filmstrip.errorOccurred.connect(self.show_error)
         self.inspector.canvas.set_preview(self.preview)
+        self.crop_item.cropActiveChanged.connect(self._on_crop_active_changed)
+        self.crop_item.previewChanged.connect(self._on_crop_dragged)
+        self.preview.geometryChanged.connect(lambda _on: self._update_crop_tool())
+        self.doc.sourceChanged.connect(self._sync_crop_tool)
         self.inspector.canvas.zoomChanged.connect(
             lambda z: self._zoom_label.setText(f"{z * 100:.0f}%")
         )
@@ -274,6 +313,39 @@ class MainWindow(QMainWindow):
         if path is not None:
             event.acceptProposedAction()
             self.open_file(path)
+
+    # ------------------------------------------------------------------ crop
+    def _update_crop_tool(self) -> None:
+        """Show the rectangle iff the tool is on and we're not previewing the output.
+
+        In geometry preview the canvas shows the already-cropped output, whose pixels no
+        longer correspond to source pixels, so a source-pixel rectangle would be wrong there.
+        """
+        self.crop_item.set_tool_enabled(
+            self.act_crop_tool.isChecked() and not self.preview.geometry_enabled
+        )
+
+    def _on_crop_tool_toggled(self, on: bool) -> None:
+        self._update_crop_tool()
+        if on and self.doc.is_open and self.doc.state.crop is None:
+            self.crop_item.activate()  # give the user a box to drag (one undo step)
+
+    def _on_crop_active_changed(self, active: bool) -> None:
+        # A crop created elsewhere (the panel) turns the tool on so it is visible. Removing
+        # the crop leaves the tool as it was (the user may want to drag a new one).
+        if active and not self.act_crop_tool.isChecked():
+            self.act_crop_tool.setChecked(True)
+
+    def _sync_crop_tool(self) -> None:
+        """New file: the tool starts off (no handles on a fresh, uncropped image)."""
+        self.act_crop_tool.blockSignals(True)
+        self.act_crop_tool.setChecked(False)
+        self.act_crop_tool.blockSignals(False)
+        self._update_crop_tool()
+
+    def _on_crop_dragged(self, rect) -> None:
+        r = rect.toRect()
+        self.statusBar().showMessage(f"Crop {r.width()}\u00d7{r.height()} at {r.x()},{r.y()}", 2000)
 
     # -------------------------------------------------------------- trimming
     def trim_in_here(self) -> None:
