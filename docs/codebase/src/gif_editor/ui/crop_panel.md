@@ -87,7 +87,7 @@ flowchart LR
 9. **Full image button** → set the rectangle to cover everything (`x=y=0`, `w=canvas_w`, `h=canvas_h`) and, per rule 6, store `crop=None`. `merge_key=None`. It leaves the Aspect combo as it was.
 10. **Center button** → pick the size to centre: if `state.crop is not None` use `(crop.w, crop.h)`; else use the **current output size** `output_dimensions(canvas_w, canvas_h, None, state.size)` (i.e. `state.size` if set, else the canvas). Then `w=min(w, canvas_w)`, `h=min(h, canvas_h)`, `x=(canvas_w − w)//2`, `y=(canvas_h − h)//2`; store the result (rule 6 applies, so a full-size result stores `None`). `merge_key=None`.
 11. **Reset button** → `crop=None`, set the Aspect combo back to `Free`, `merge_key=None`. (The only difference from "Full image": Reset also returns the combo to `Free`; both end with `crop=None` and an unchecked group.)
-12. **Group checkbox** → checked ⇔ `state.crop is not None` (mirrored on `_refresh`). **Unchecking** clears the crop (`crop=None`, `merge_key=None`). **Checking** applies the *Center* rule (rule 10) as a default, so the box never sits "checked with no crop"; from an unchecked state that means the current output size, centred. `merge_key=None` for both directions.
+12. **Group checkbox** → checked ⇔ `state.crop is not None` (mirrored on `_refresh`). **Unchecking** clears the crop (`crop=None`, `merge_key=None`). **Checking** applies the *Center* rule (rule 10) as a default, so the box never sits "checked with no crop"; from an unchecked state that means the current output size, centred. If that centred default is the whole frame (no explicit size set), it would normalise to `None` and the tick would do nothing, so the panel instead creates a centred crop at **80% of the canvas** on each side. `merge_key=None` for both directions.
 
 ### The full-frame ("size follows crop/base") rule
 `core.render.output_dimensions(canvas_w, canvas_h, crop, size)` returns the explicit `size` if set, else the crop's `W×H` if a crop is set, else the canvas `W×H`. So **`EditState.size is None` means "follow the crop (or the canvas when there is no crop)"**. A crop that covers the whole frame is therefore stored as `crop=None`, not as `CropRect(0, 0, W, H)`: the two are geometrically identical (`output_dimensions` gives the canvas either way), but `None` is the canonical "no crop" value that the status line, the checkbox and the settings panel's base-size logic all key on. Keeping it canonical is what stops a redundant full-frame crop from being confused with a real one.
@@ -105,7 +105,8 @@ flowchart LR
 
 ### Enabled state
 - **No source open:** `crop_group` is unchecked and disabled, `aspect_combo` / the four spinboxes / the three buttons are disabled, ranges collapse to X,Y `0…0` and W,H `1…1`, status is `No crop`. Every handler returns early when `doc.is_open` is `False`, so even a programmatically forced value change pushes nothing.
-- **Source open:** all controls enabled; ranges are X `0…canvas_w−1`, Y `0…canvas_h−1`, W `1…canvas_w`, H `1…canvas_h` (set in `_on_source_changed`).
+- **Source open, crop ticked:** all controls enabled; ranges are X `0…canvas_w−1`, Y `0…canvas_h−1`, W `1…canvas_w`, H `1…canvas_h` (set in `_on_source_changed`).
+- **Source open, crop unticked:** the group box itself is enabled (you can tick it), but its children are greyed out. This is not code in this file: a *checkable* `QGroupBox` force-disables its children while unchecked, and that overrides an explicit `setEnabled(True)`. The result is the standard "tick to crop" behaviour: with no crop the numbers are read-only and show the full frame, and ticking the box creates a centred crop (rule 12).
 
 ### Errors
 Every `doc.apply` goes through a `_try` wrapper (the settings-panel pattern). On `ValueError` (an invalid `CropRect` — e.g. a negative origin or a rectangle past the canvas, which the clamping normally prevents) the panel stores `last_error`, reverts every control to `doc.state` (nothing changed there — `apply` is atomic), and emits `errorOccurred(message)`. The host (settings panel) shows it in the summary card. The next successful `stateChanged` or `sourceChanged` clears `last_error`.
@@ -114,7 +115,7 @@ Every `doc.apply` goes through a `_try` wrapper (the settings-panel pattern). On
 - **Every** programmatic write to a control happens inside `_blocked()`; otherwise an undo/redo would push new commands and corrupt the redo history.
 - When adding a control, add it to the `_blocked()` list, connect it in `_connect_controls`, mirror it in `_refresh`, and give it a merge key (spinboxes `"crop"`, discrete actions `None`).
 - The panel mirrors `crop_group.checked` from `state.crop`; the two can never disagree after a refresh. Checking the box is the only way the panel fabricates a default crop (rule 12).
-- `merge_key="crop"` is shared with `ui/inspector/crop_item.py`. Consequence (inherited from `commands.py`): two consecutive crop gestures with the same key merge into one undo step, so a spinbox nudge immediately after a drag can merge with it. The timebar avoids this with a per-drag key (`"trim-drag-N"`); the CropItem should ideally do the same (`"crop-drag-N"`). This page follows the brief and uses `"crop"` for spinboxes; the choice for the drag lives in `crop_item.py` (**orchestrator to confirm**).
+- Merge keys: spinboxes use `"crop"`; `ui/inspector/crop_item.py` uses a per-drag key `"crop-drag-N"`. `commands.py` merges *any* consecutive commands with the same key, so sharing one key would have merged a canvas drag with the spinbox nudge that follows it. Separate keys keep them as separate undo steps.
 - "Full image" and "Reset" both end at `crop=None`; they differ only in the Aspect combo (Reset returns it to `Free`) and in the undo `text`. They are deliberately near-aliases.
 - The aspect lock is UI-only, exactly like "Lock aspect" in the Output size group: it is not part of `EditState`, is not undoable, and is never inferred from the state.
 - The status percentage uses the canvas area as the denominator; it is a fraction of the full frame, not of the current crop.
@@ -125,4 +126,8 @@ Every `doc.apply` goes through a `_try` wrapper (the settings-panel pattern). On
 - Gaps: no pixel/visual check of the layout, the disabled-grey look or the group's collapse rendering; no real HiDPI check (M4).
 
 ## History
-- Written as the **Milestone 3 specification by a docs worker** (docs only — no `.py` file yet). The orchestrator implements `src/gif_editor/ui/crop_panel.py`, its test file and the `settings_panel.py` / `INDEX.md` wiring from this page.
+- Written as the **Milestone 3 specification by a docs worker** before any code existed.
+- Implemented by the orchestrator from this page, with two decisions the spec left open:
+  1. **Merge keys.** Spinboxes use `"crop"`; the canvas `CropItem` uses a per-drag key `"crop-drag-N"` (like the timebar's `"trim-drag-N"`), so a spinbox nudge right after a drag stays a separate undo step. This resolves the warning in *Invariants & gotchas*.
+  2. **Ticking with a full-frame default** creates an 80% centred crop instead of doing nothing (rule 12).
+- Documented deviation from the spec: inputs are greyed out while the group is unticked (Qt behaviour, see *Enabled state*).
