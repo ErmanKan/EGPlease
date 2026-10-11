@@ -206,3 +206,46 @@ def test_middle_drag_pans_when_zoomed(qtbot, canvas):
     qtbot.mouseMove(vp, QPoint(150, 150))
     qtbot.mouseRelease(vp, Qt.MouseButton.MiddleButton, pos=QPoint(150, 150))
     assert h.value() != before
+
+
+def test_expensive_source_frame_renders_off_thread(qtbot, tmp_path, monkeypatch):
+    """A frame too costly for the GUI thread is fetched through the preview service."""
+    import threading
+
+    from gif_editor.core.decoder import GifSource, Limits
+    from gif_editor.ui.document import Document
+    from gif_editor.ui.inspector import canvas as canvas_mod
+    from gif_editor.ui.inspector.canvas import FrameCanvas
+    from gif_editor.ui.inspector.preview import PreviewService
+    from gifgen import PALETTE, make_gif, solid_frames
+
+    path = make_gif(tmp_path / "s.gif", solid_frames(40, (32, 32)), 50)
+    doc = Document()
+    doc.set_source(GifSource.open(path, limits=Limits(cache_budget_bytes=0)), path)
+    preview = PreviewService(doc)
+    canvas = FrameCanvas(doc)
+    canvas.set_preview(preview)
+    qtbot.addWidget(canvas)
+    monkeypatch.setattr(canvas_mod, "SYNC_DECODE_PIXELS", 32 * 32 * 3)  # > 3 frames: async
+
+    gui = threading.get_ident()
+    decoded_on = []
+    real = doc.source.frame
+
+    def tracking(i):
+        decoded_on.append(threading.get_ident())
+        return real(i)
+
+    monkeypatch.setattr(doc.source, "frame", tracking)
+    doc.set_current_index(30)  # 31 frames from the start: expensive
+    assert canvas._awaiting_source == 30
+    qtbot.waitUntil(lambda: canvas._awaiting_source is None, timeout=5000)
+    assert decoded_on and gui not in decoded_on  # decoded on a pool thread only
+    img = canvas._item.pixmap().toImage()
+    r, g, b = PALETTE[30 % len(PALETTE)]
+    assert img.pixelColor(16, 16).getRgb()[:3] == (r, g, b)
+    decoded_on.clear()
+    doc.set_current_index(31)  # next in sequence: cheap, stays on the GUI thread
+    assert canvas._awaiting_source is None and decoded_on == [gui]
+    preview.dispose()
+    doc.close()

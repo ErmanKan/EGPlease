@@ -43,6 +43,10 @@ MAX_ZOOM = 32.0
 ZOOM_STEP = 1.25
 FIT_MARGIN = 16  # logical px kept free around the image in fit mode
 PLACEHOLDER_TEXT = "Open a GIF (Ctrl+O) or drop it here"
+#: Above this much compositing work (frames to decode x canvas pixels), a source frame is
+#: rendered in the background instead of on the GUI thread. About 25 ms of decoding: small
+#: GIFs and normal playback stay synchronous; jumps in large GIFs go off-thread.
+SYNC_DECODE_PIXELS = 4_000_000
 DELETED_TINT = QColor(220, 30, 30, 90)
 
 
@@ -70,6 +74,7 @@ class FrameCanvas(QGraphicsView):
         self._middle_panning = False
         self._checker = checkerboard_brush()
         self._preview = None  # PreviewService, attached by the main window (optional)
+        self._awaiting_source: int | None = None  # source frame requested off-thread
 
         self._scene = QGraphicsScene(self)
         self._item = QGraphicsPixmapItem()
@@ -236,9 +241,17 @@ class FrameCanvas(QGraphicsView):
             self._resize_scene()
 
     def _on_preview_frame(self, index: int, image: QImage) -> None:
-        """A rendered output frame arrived. Show it if it is still the current one."""
-        if not self.geometry_preview or index != self._doc.current_index:
+        """A background-rendered frame arrived. Show it if it is still the current one.
+
+        Two cases: an output frame in geometry-preview mode, or a source frame the canvas
+        asked for because decoding it on the GUI thread would have been slow.
+        """
+        if index != self._doc.current_index:
             return
+        if not self.geometry_preview:
+            if index != self._awaiting_source:
+                return
+            self._awaiting_source = None
         old = self._item.pixmap().size()
         self._item.setPixmap(QPixmap.fromImage(image))  # GUI thread: QPixmap is safe here
         if self._item.pixmap().size() != old:
@@ -266,9 +279,18 @@ class FrameCanvas(QGraphicsView):
             # calls _on_preview_frame. Requesting here too would render every frame twice.
             # Keep the old pixmap meanwhile (no flash of the uncropped frame).
             return
-        # Synchronous on purpose: GifSource caches composited frames, so this is a
-        # dictionary lookup + one RGBA conversion for typical GIFs. (M3/M4 may move
-        # large-frame decoding off-thread.)
+        # Cheap frames (cached, or the next one during playback) are decoded right here, so
+        # stepping and playing show the frame immediately. An expensive one (a jump in a GIF
+        # bigger than the decoder cache) would freeze the window, measured at up to 0.4 s
+        # per step scrubbing a 1080p GIF backwards, so it goes to the preview service's
+        # background render instead; the old frame stays up until it arrives.
+        meta = source.meta
+        cost = source.frames_to_decode(index) * meta.width * meta.height
+        if self._preview is not None and cost > SYNC_DECODE_PIXELS:
+            self._awaiting_source = index
+            self._preview.request_frame(index)  # geometry off: the plain source frame
+            return
+        self._awaiting_source = None
         img = source.frame(index)
         self._item.setPixmap(QPixmap.fromImage(pil_to_qimage(img)))
 

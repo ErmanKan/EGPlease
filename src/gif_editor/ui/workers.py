@@ -27,7 +27,11 @@ class _Relay(QObject):
 
 
 def _job(
-    fn: Callable[..., Any], relay: _Relay, with_progress: bool, exited: threading.Event
+    fn: Callable[..., Any],
+    relay: _Relay,
+    with_progress: bool,
+    exited: threading.Event,
+    print_errors: bool,
 ) -> Callable[[], None]:
     """The function a pool thread runs: call ``fn``, report through ``relay``.
 
@@ -49,7 +53,8 @@ def _job(
         except BaseException as exc:
             msg = str(exc) or type(exc).__name__
             relay.failed.emit(msg, exc)
-            traceback.print_exc()
+            if print_errors:  # nobody handles it: at least leave a trace on the console
+                traceback.print_exc()
         else:
             relay.finished.emit(result)
         finally:
@@ -109,4 +114,6 @@ def run_async(
 
     relay.finished.connect(_done)
     relay.failed.connect(_fail)
-    (pool or QThreadPool.globalInstance()).start(_job(fn, relay, on_progress is not None, exited))
+    (pool or QThreadPool.globalInstance()).start(
+        _job(fn, relay, on_progress is not None, exited, print_errors=on_error is None)
+    )

@@ -9,6 +9,7 @@ was blocked (the window would look frozen for that long).
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -69,7 +70,7 @@ def make_big(path: Path, w: int, h: int, n: int) -> Path:
     for i in range(n):
         a = base.copy()
         a[(i * 3) % h : (i * 3) % h + 40, :, :] = 255 - a[(i * 3) % h : (i * 3) % h + 40, :, :]
-        frames.append(Image.fromarray(a).quantize(64))
+        frames.append(Image.fromarray(a).quantize(64, method=Image.Quantize.FASTOCTREE))
     frames[0].save(path, save_all=True, append_images=frames[1:], duration=40, loop=0)
     return path
 
@@ -90,7 +91,10 @@ def main() -> None:
     for name in ("truncated", "not_a_gif", "large_canvas_header", "zero_delays", "interlaced"):
         cases[f"corpus:{name}"] = corpus[name][0]
 
+    only = os.environ.get("PROBE_ONLY")  # e.g. PROBE_ONLY=huge runs one case
     for label, path in cases.items():
+        if only and only not in label:
+            continue
         print(f"{label}  ({path.stat().st_size / 1e6:.1f} MB)")
         w.last_error = None
         with meter:

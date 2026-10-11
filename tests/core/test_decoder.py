@@ -287,3 +287,46 @@ def test_frame_after_close_raises(gif: Path):
     src.close()
     with pytest.raises(ValueError, match="closed"):
         src.frame(1)
+
+
+def test_frames_to_decode_tracks_the_cache(tmp_path):
+    """0 when cached, 1 for the next frame in sequence, more when jumping without a cache."""
+    path = make_gif(tmp_path / "a.gif", solid_frames(40, (32, 32)), 50)
+    with GifSource.open(path) as src:
+        # Opening composites every frame and caches what fits: small GIFs are all cached.
+        assert [src.frames_to_decode(i) for i in (0, 20, 39)] == [0, 0, 0]
+    # No cache at all: frames are composited from frame 0 or the last frame drawn.
+    tiny = Limits(cache_budget_bytes=0)
+    with GifSource.open(path, limits=tiny) as src:
+        src.frame(10)
+        assert src.frames_to_decode(11) == 1  # the next frame resumes from frame 10
+        assert src.frames_to_decode(10) == 11  # backwards: from frame 0 again
+        assert src.frames_to_decode(39) == 29
+        src.frame(39)
+        assert src.frames_to_decode(38) == 39
+    with pytest.raises(IndexError):
+        GifSource.open(path).frames_to_decode(40)
+
+
+def test_frames_to_decode_never_blocks(tmp_path):
+    """While another thread decodes (holding the lock) the answer is BUSY, immediately."""
+    import time
+
+    path = make_gif(tmp_path / "a.gif", solid_frames(4, (8, 8)), 50)
+    with GifSource.open(path) as src:
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with src._lock:
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        assert held.wait(5)
+        t0 = time.perf_counter()
+        assert src.frames_to_decode(2) == GifSource.BUSY
+        assert time.perf_counter() - t0 < 0.05
+        release.set()
+        t.join()
+        assert src.frames_to_decode(2) == 0

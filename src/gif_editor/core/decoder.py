@@ -659,6 +659,40 @@ class GifSource:
                 img = self._render(i)
             return img.copy()
 
+    #: ``frames_to_decode`` result while another thread holds the decoder.
+    BUSY = 1 << 30
+
+    def frames_to_decode(self, i: int) -> int:
+        """How many frames ``frame(i)`` would composite right now (0 = cached).
+
+        Mirrors ``_resume_point`` without copying any canvas, so it is cheap enough to call
+        before every frame request. The UI uses it to decide whether ``frame(i)`` is fast
+        enough for the GUI thread or should run in the background (scrubbing backwards
+        through a GIF bigger than the cache can mean re-compositing 30+ large frames).
+
+        Never blocks: if another thread is decoding right now (it holds the lock for the
+        whole render), the answer is ``BUSY``, a cost so high the caller goes asynchronous
+        instead of waiting on the GUI thread for that render to finish.
+        """
+        self._check_index(i)
+        if not self._lock.acquire(blocking=False):
+            return self.BUSY
+        try:
+            if i in self._cache.lru:
+                return 0
+            start = 0
+            k = self._cache.nearest_checkpoint(i)
+            if k is not None:
+                start = k
+            if self._last is not None and start <= self._last[0] < i:
+                start = self._last[0] + 1
+            for j in range(i - 1, start - 1, -1):
+                if j in self._cache.lru and self._frames[j].disposal != 3:
+                    return i - j
+            return i - start + 1
+        finally:
+            self._lock.release()
+
     def _resume_point(self, i: int) -> tuple[int, np.ndarray]:
         """Pick the latest known canvas state from which frame ``i`` can be composited.
 
