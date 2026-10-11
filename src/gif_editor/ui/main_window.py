@@ -36,6 +36,12 @@ from gif_editor.ui.inspector.crop_item import CropItem
 from gif_editor.ui.inspector.inspector import Inspector
 from gif_editor.ui.inspector.player import Player
 from gif_editor.ui.inspector.preview import PreviewService
+from gif_editor.ui.messages import (
+    Explanation,
+    explain_generate_error,
+    explain_load_error,
+    explain_load_warnings,
+)
 from gif_editor.ui.settings_panel import SettingsPanel
 from gif_editor.ui.workers import run_async
 
@@ -62,6 +68,7 @@ class MainWindow(QMainWindow):
         # Renders cropped/resized preview frames and keeps the output size estimate.
         self.preview = PreviewService(self.doc, self)
         self.last_error: str | None = None
+        self.last_dialog: QMessageBox | None = None  # most recent error/warning dialog
         self.last_result: GenerateResult | None = None
         self._loading = False
         self._generating = False
@@ -266,11 +273,28 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- errors
     def show_error(self, message: str, title: str = "GIF Editor") -> None:
         """Show a non-blocking warning and remember it (``last_error``)."""
-        self.last_error = message
-        self.statusBar().showMessage(message, 8000)
-        box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self)
+        self.show_explanation(Explanation(title, message, ""))
+
+    def show_explanation(
+        self, expl: Explanation, icon: QMessageBox.Icon = QMessageBox.Icon.Warning
+    ) -> QMessageBox:
+        """Show ``expl`` in a non-blocking dialog: headline, body, technical details.
+
+        The details go behind Qt's "Show Details..." button: hidden by default (they mean
+        nothing to most users) but one click away, and selectable for copying into a bug
+        report. ``last_error`` keeps headline + body for tests and the status bar.
+        """
+        self.last_error = expl.text
+        self.statusBar().showMessage(expl.headline, 8000)
+        box = QMessageBox(icon, expl.title, expl.headline, parent=self)
+        if expl.body:
+            box.setInformativeText(expl.body)
+        if expl.details and expl.details != expl.headline:
+            box.setDetailedText(expl.details)
         box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         box.open()
+        self.last_dialog = box
+        return box
 
     # ------------------------------------------------------------------ open
     def open_dialog(self) -> None:
@@ -297,15 +321,18 @@ class MainWindow(QMainWindow):
             self._refresh_enabled()
             meta = source.meta
             msg = f"Opened {path.name}: {meta.frame_count} frames, {meta.width}\u00d7{meta.height}"
-            if source.warnings:
-                msg += " \u2014 " + "; ".join(source.warnings)
             self.statusBar().showMessage(msg, 8000)
+            if source.warnings:
+                # A partly-read file changes the result (it is shorter): a status-bar line
+                # that vanishes after 8 s is too easy to miss, so say it in a dialog.
+                expl = explain_load_warnings(source.warnings, path, meta.frame_count)
+                self.show_explanation(expl, QMessageBox.Icon.Information)
 
-        def failed(message: str, _exc: BaseException) -> None:
+        def failed(_message: str, exc: BaseException) -> None:
             self._loading = False
             self.unsetCursor()
             self._refresh_enabled()
-            self.show_error(f"Could not open {path.name}:\n{message}", "Open failed")
+            self.show_explanation(explain_load_error(exc, path))
 
         run_async(lambda: GifSource.open(path), on_done=done, on_error=failed)
 
@@ -460,12 +487,12 @@ class MainWindow(QMainWindow):
                 msg += " \u2014 " + "; ".join(result.warnings)
             self.statusBar().showMessage(msg, 15000)
 
-        def failed(message: str, exc: BaseException) -> None:
+        def failed(_message: str, exc: BaseException) -> None:
             finish()
             if isinstance(exc, Cancelled):
                 self.statusBar().showMessage("Generate cancelled; nothing was written.", 6000)
             else:
-                self.show_error(f"Generate failed:\n{message}", "Generate failed")
+                self.show_explanation(explain_generate_error(exc, path))
 
         run_async(
             lambda report: generate(source, state, path, progress=report, cancel=cancel),
@@ -505,7 +532,10 @@ class MainWindow(QMainWindow):
                 source, self.doc.current_index, path, self.doc.state if with_edits else None
             )
         except (OSError, ValueError) as exc:
-            self.show_error(f"Could not save the frame:\n{exc}", "Save failed")
+            if isinstance(exc, OSError):
+                self.show_explanation(explain_generate_error(exc, path, "Save failed"))
+            else:
+                self.show_error(f"Could not save the frame: {exc}", "Save failed")
             return None
         self.statusBar().showMessage(f"Saved frame {self.doc.current_index + 1} to {out}", 6000)
         return out

@@ -48,6 +48,41 @@ def test_open_bad_file_reports_error(qtbot, win, tmp_path):
     win.open_file(bad)
     qtbot.waitUntil(lambda: win.last_error is not None, timeout=5000)
     assert "bad.gif" in win.last_error and not win.doc.is_open
+    # Plain words up front, the technical message behind "Show Details...".
+    assert "is not a GIF" in win.last_error
+    assert "Not a GIF file" in win.last_dialog.detailedText()
+
+
+def test_open_truncated_file_explains_partial_load(qtbot, win, tmp_path):
+    from corpus import build_all
+    from gif_editor.core.decoder import GifSource
+
+    path = build_all(tmp_path)["truncated"][0]
+    win.open_file(path)
+    qtbot.waitUntil(lambda: win.doc.is_open and not win.is_busy, timeout=5000)
+    assert "is damaged" in win.last_error and "could be loaded" in win.last_error
+    assert win.last_dialog.icon() == win.last_dialog.Icon.Information
+    with GifSource.open(path) as s:
+        assert win.last_dialog.detailedText() == "\n".join(s.warnings)
+
+
+def test_generate_write_error_is_explained(qtbot, win, gif_path, tmp_path, monkeypatch):
+    import errno
+
+    from gif_editor.ui import main_window
+
+    _open(qtbot, win, gif_path)
+
+    def denied(*_a, **_k):
+        raise PermissionError(errno.EACCES, "Permission denied", str(tmp_path / "x.tmp"))
+
+    monkeypatch.setattr(main_window, "generate", denied)
+    win.generate_to(tmp_path / "out.gif")
+    qtbot.waitUntil(lambda: win.last_error is not None and not win.is_busy, timeout=5000)
+    assert "No permission to save" in win.last_error
+    assert "Nothing was written" in win.last_error
+    assert "Permission denied" in win.last_dialog.detailedText()
+    assert not (tmp_path / "out.gif").exists()
     assert win.act_open.isEnabled()
 
 
