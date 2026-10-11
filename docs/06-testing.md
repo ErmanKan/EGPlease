@@ -2,7 +2,7 @@
 
 How the tests are organised, how to run them here and on Windows, how GIF fixtures are generated, and how headless Qt works in the dev container.
 
-Current state (end of Milestone 2): **524 tests, 522 passed, 2 xfailed** (`scripts/test.sh`, about 11 s), stable over repeated runs.
+Current state (end of Milestone 3): **642 tests, 640 passed, 2 xfailed** (`scripts/test.sh`), stable over repeated runs.
 
 ## Running the tests
 
@@ -34,6 +34,7 @@ tests/
 │  ├─ test_render.py        44   crop/resize/palette/quantize
 │  ├─ test_encoder.py       62   writer structure, lossless diffs, atomicity
 │  ├─ test_pipeline.py      24   end to end, size and flicker
+│  ├─ test_estimate.py       6   size estimate, write_stream
 │  └─ test_selftest.py       6   Pillow-internals self-test
 └─ ui/                    pytest-qt, needs offscreen Qt
    ├─ conftest.py            gif_path, doc fixtures
@@ -46,8 +47,12 @@ tests/
    ├─ test_timebar.py       19   seek, trim handles, snapping     │ one file per widget
    ├─ test_filmstrip.py     16   thumbnails, selection, keys      │
    ├─ test_player.py        22   timing, looping, preview         │
-   ├─ test_transport.py     10   buttons, label, bindings         ┘
-   └─ test_main_window.py   14   whole-window integration
+   ├─ test_transport.py     10   buttons, label, bindings         │
+   ├─ test_crop_panel.py    32   crop fields, aspect, merge keys  │
+   ├─ test_crop_item.py     35   canvas crop drags, handles       │
+   ├─ test_preview.py       27   preview frames, size estimate    ┘
+   ├─ test_main_window.py   17   whole-window integration
+   └─ test_m3_integration.py 15  M3 wiring: geometry preview, crop tool, real drag
 ```
 Numbers are collected test cases (parametrizations counted).
 
@@ -60,8 +65,8 @@ UI tests come in three tiers. All of them use pytest-qt and run on the `offscree
 | Tier | Files | Builds | Checks |
 |---|---|---|---|
 | Foundation | `test_document.py`, `test_workers.py`, `test_qt_image.py`, `test_smoke.py` | `Document`, `run_async`, helpers | the contract every widget relies on (undo, merging, signals, cross-thread delivery) |
-| Widget | `test_settings_panel.py`, `test_canvas.py`, `test_timebar.py`, `test_filmstrip.py`, `test_player.py`, `test_transport.py` | **one widget** + the `doc` fixture | the widget's input → `Document` call, and `Document` signal → what the widget shows; empty/closed states; painting doesn't crash |
-| Integration | `test_main_window.py` | the whole `MainWindow` | wiring: actions and a real shortcut, async open/drop, Generate + cancel end to end, PNG export, `app.main` |
+| Widget | `test_settings_panel.py`, `test_canvas.py`, `test_timebar.py`, `test_filmstrip.py`, `test_player.py`, `test_transport.py`, `test_crop_panel.py`, `test_crop_item.py`, `test_preview.py` | **one widget** + the `doc` fixture | the widget's input → `Document` call, and `Document` signal → what the widget shows; empty/closed states; painting doesn't crash |
+| Integration | `test_main_window.py`, `test_m3_integration.py` | the whole `MainWindow` (or a widget + `PreviewService`) | wiring: actions and a real shortcut, async open/drop, Generate + cancel end to end, PNG export, `app.main`; M3: geometry preview, Size line, crop tool rules, a real canvas drag, Generate applies the crop |
 
 **Widget tests** construct the widget alone with `Widget(doc)` (the transport also gets a `Player`). Because widgets talk only to `Document`, no other widget is needed. They drive input with simulated mouse/keys, or hand-built `QMouseEvent`s when modifiers matter (e.g. Alt on the timebar). They assert on `doc.state`, `doc.current_index` and signals, and they check that undo moves the widget back. Timing-sensitive code is tested without real time: `Player(clock=fake, time_scale=...)` injects a fake monotonic clock.
 

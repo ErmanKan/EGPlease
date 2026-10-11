@@ -115,3 +115,62 @@ Five widget workers and one documentation worker ran in parallel. Each owned its
 
 ### Documentation pass (end of M2)
 The documentation was brought up to date for the finished milestone: new pages for the main window, the inspector and the main-window tests; the architecture page now shows the real widget tree and signal flow; AGENTS.md gained the per-widget interfaces; README lists features and shortcuts; `02-plan.md` got an *Implementation notes (deviations)* section instead of a rewrite; the decoder's module docstring now names the right Pillow call.
+
+## Milestone 3: Crop and live preview
+
+### Before M3: post-M2 fixes (`76cd65c`)
+Standard shortcuts now get all their platform bindings (`setShortcuts`), Close is Ctrl+W and Quit Ctrl+Q, Redo is also Ctrl+Shift+Z; Ctrl+G refuses an empty output like the Generate button does; Generate warnings are shown in the status bar. The `fetch-devlibs.sh` header comment now says it checks only the pinned hash.
+
+### Commits
+| Commit(s) | By | Delivered |
+|---|---|---|
+| `b9021ca` | orchestrator | `pipeline.estimate_size` (+ `_encoded_size`) and `encoder.write_stream`; `tests/core/test_estimate.py` |
+| `fe4e1a8` | docs worker | The `CropPanel` **specification** (`crop_panel.md`, rule by rule) and its test checklist, written before any code |
+| `053ed66`, `e205656` | orchestrator | **Shutdown snapshot:** `docs/RESUME-HERE.md` and the unverified `preview.py` committed as a flagged snapshot; then lint/format of that file |
+| `e904982` | orchestrator | `PreviewService` verified: 4 broken tests fixed, one real thread-safety fix, `tests/ui/test_preview.py` |
+| `ac973e9` | orchestrator | `CropPanel` implemented from the spec, `test_crop_panel.py`; the `PreviewService` doc pages |
+| `6e8a3ad` | crop-item worker (restarted) | `CropItem`: drag/resize with 8 handles, dimmed outside, one undo step per drag; tests and pages |
+| `3adb5bd` | orchestrator | Wiring: geometry preview in the canvas, Size line and crop panel in the settings panel, P previews the whole output; `test_m3_integration.py` |
+| `484382d` | orchestrator | Crop tool (C) with the canvas rectangle, Crop menu, Ctrl+arrow nudge / Ctrl+Shift+arrow resize, hidden during output preview; more integration tests |
+
+### The size estimate: measure a run, not single frames (`b9021ca`)
+The summary card needed "Size: ≈ …". The first version encoded the sample frames **one at a time** and multiplied the average by the frame count. On a GIF with a static background it **overestimated by 3.4×**. The reason is how GIF (and our encoder) stores animation: every frame after the first is only the *difference* from the previous one (changed rectangle, unchanged pixels transparent). A frame encoded on its own is a full first frame, so each sample paid for the whole picture again.
+
+The fix encodes a **contiguous** run of 5 output frames from the middle of the timeline as **one** stream, encodes the run's first frame alone, and uses the difference as the marginal cost of one more frame: `estimate = first + (run − first) / 4 × (n − 1)`. To encode in memory with the real encoder, the body of `write_gif` was split out as `write_stream` (any open binary stream; `write_gif` delegates to it), so the estimate counts the same bytes Generate would write and never touches the disk.
+
+Measured: estimate / real = **1.00–1.18** on the photo-like and flat cases, **0.67** on a heavily cropped long case; **4–80 ms** per estimate. The UI labels it "≈ … (estimate)". Details: [pipeline page](codebase/src/gif_editor/core/pipeline.md#estimate_size-and-_encoded_size).
+
+### The PC shutdown mid-milestone (`053ed66`, `e205656`)
+The PC had to be shut down while two workers were running (the preview service and the crop item); the crop panel and the wiring had not started. **Background workers are not durable**: closing the machine kills them, and whatever they had not committed exists only as loose files. Before shutting down, the orchestrator:
+- wrote `docs/RESUME-HERE.md`: what is done and committed, what is unverified, what was never started, the next steps in order, and the environment reminders;
+- committed the half-finished `ui/inspector/preview.py` as a clearly **flagged snapshot** ("written but never tested or reviewed; treat as unverified"), then a lint/format commit, so nothing on disk was uncommitted.
+
+On resume:
+- **The crop-item worker had died before writing any file.** There was nothing to salvage, so it was restarted from its task spec and delivered `6e8a3ad`.
+- **The preview worker's file was verified, not trusted** (`e904982`). Its test file had **4 broken tests** (fixed), and review found **one real thread-safety bug**: the pool-thread render read the live crop/size from the document. An edit made while a frame was rendering could leak into an image that was then cached and labelled with the old request. The worker now receives the geometry **captured at request time** as an argument and reads no shared state; a regression test queues a render with crop A, changes the crop to B, then runs the job and asserts crop A was used.
+
+### Notable decisions
+- **Two crop editors, no link between them.** `CropItem` (canvas) and `CropPanel` (settings panel) both write `doc.state.crop` and both refresh from `stateChanged`; neither imports the other. The two-way sync is free because both follow `Document`.
+- **Merge keys per gesture.** Crop spinboxes use `"crop"`; each canvas drag uses a fresh `"crop-drag-N"` (like the timebar's `"trim-drag-N"`); buttons, nudges and the Crop tick use `None`. A shared `"crop"` key would have merged a drag with the spinbox edit that follows it (one undo would revert both). See [architecture §9](03-architecture.md#merge-keys-one-undo-step-per-gesture).
+- **The checkable `QGroupBox` greys its inputs when unticked.** Qt force-disables the children of an unchecked checkable group box, and that overrides `setEnabled(True)`. The spec had the inputs always editable; we kept Qt's behaviour as the intended **"tick to crop"** UX: with no crop the numbers are read-only and show the full frame, and ticking creates a crop. Recorded as a deviation on the [crop panel page](codebase/src/gif_editor/ui/crop_panel.md#enabled-state).
+- **Ticking with a full-frame centre makes an 80 % crop.** Ticking applies the Center rule. With no explicit output size the centred default is the whole frame, which normalises to `crop=None`, so the tick would do nothing. The panel then creates a centred crop at 80 % of each side instead.
+- **P previews the whole output.** In M2, "Preview edits" played the edited timing only. Now the same toggle also turns on the canvas's geometry preview (crop + resize), because "what the GIF will look like" includes both. The geometry follows `Player.previewEditsChanged`, so the transport check box drives it too.
+- **The canvas does not request preview frames itself.** `PreviewService` already follows `currentIndexChanged`; requesting from the canvas too rendered every frame twice.
+- **Crop tool rules.** Off on a new file; turning it on with no crop creates a 10 % inset box (one undo step) so there is something to drag; a crop that appears from the panel (or undo) turns it on; hidden during output preview, because the shown image is already cropped and a source-pixel rectangle would be wrong there. Nudge/resize are window actions on Ctrl+arrows and Ctrl+Shift+arrows, because plain and Shift+arrows step frames.
+
+### Verification
+- Full suite: **640 passed + 2 xfailed** (the documented Pillow disposal-2 differences), stable over repeated runs; ruff format and lint clean.
+- `test_crop_panel.py`, `test_crop_item.py`, `test_preview.py` and `test_m3_integration.py` were each run **3×** in a row with no flakes.
+- A **real mouse drag** on the canvas (press, moves, release on the viewport at zoom 8) was tested end to end: the document is untouched mid-drag, one undo step on release, the crop panel follows. **Generate writes the canvas crop** (32×24 output after C on a 40×30 GIF).
+- Layout check of the real window at **1300×820** (offscreen, screenshot): no overlapping panels; the Crop group sits between Output size and Quality; the settings panel now scrolls by about **75 px**; the live numbers (output size, Size estimate, crop status) were consistent. Screenshot: `out/m3-window.png` (`out/` is gitignored).
+
+### Process note: never move a worker's file aside
+To run the test suite while a worker was still busy, the orchestrator once moved that worker's in-progress file out of the way. That was a mistake: the worker was still writing the file, so the move raced with it. **Lesson:** to exclude a file that is still being written, pass `--ignore=<path>` to pytest (`scripts/test.sh --ignore=tests/ui/test_x.py`) and leave the file alone.
+
+### Known limitations (carried to M4)
+- "Remove crop" and the Ctrl+arrow crop actions are enabled while the crop tool is off, but do nothing then (they need the tool on). The crop panel always works.
+- Space still toggles playback, so Space+drag does not pan in the app; middle-drag pans.
+- The estimate can be low for long GIFs whose middle is unrepresentative (0.67 in the cropped long case).
+
+### Documentation pass (end of M3)
+New pages for `tests/core/test_estimate.py` and `tests/ui/test_m3_integration.py`; the pipeline, encoder, canvas, settings panel and main window pages updated; the codebase index completed (and its `test_main_window.py` link fixed); the architecture page shows the M3 widget tree, data flow and the merge-key scheme; README, AGENTS.md and RESUME-HERE describe the state after M3. Stale post-M2 details were corrected on the way (shortcut table, Ctrl+G guard, Generate warnings, the `fetch-devlibs.sh` comment).

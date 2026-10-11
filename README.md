@@ -2,7 +2,7 @@
 
 Offline Windows desktop GIF editor (Python 3.13 + PySide6). Load a GIF, scrub it frame by frame, trim, delete frames, crop with a draggable rectangle, change speed / FPS / size / quality, then **Generate** a new GIF. Ships as a single portable `GifEditor.exe` (Nuitka onefile).
 
-Status: **Milestones 1–2 done** (core engine; window and inspector). Next: **M3, crop + live preview** (see [docs/02-plan.md](docs/02-plan.md#6-milestones)).
+Status: **Milestones 1–3 done** (core engine; window and inspector; crop and live preview). Next: **M4, hardening**, then **M5, the single `.exe`** (see [docs/02-plan.md](docs/02-plan.md#6-milestones) and [docs/RESUME-HERE.md](docs/RESUME-HERE.md)).
 
 ## Features (working today)
 - **Open** a GIF from File → Open, the command line, or by dragging it onto the window. Decoding runs in the background, with browser-correct disposal and transparency; damaged files load as far as possible, with a warning.
@@ -10,17 +10,19 @@ Status: **Milestones 1–2 done** (core engine; window and inspector). Next: **M
   - a zoomable canvas (Fit, 100 %, Ctrl+wheel, middle-drag pan) on a checkerboard;
   - a timebar with playhead and green/red trim handles that snap to frame boundaries (Alt = free);
   - a thumbnail filmstrip with multi-select;
-  - play/pause and frame stepping, optionally previewing the edited timing.
+  - play/pause and frame stepping;
+  - **Preview edits (P)**: plays the output timing and shows each frame cropped and resized exactly as it will be written.
 - **Edit** (all undoable, Ctrl+Z / Ctrl+Y):
   - trim by handles, by Start/Duration fields, or at the playhead (I / O);
   - delete and restore frames (deleting removes their time);
   - speed 0.25×–4×; FPS limit ≤ 50;
-  - output size with aspect lock or scale %;
+  - **crop** by dragging a rectangle on the canvas (crop tool C; 8 handles, Shift keeps the aspect, outside dimmed) or with the Crop fields (aspect presets Free / Original / 1:1 / 4:3 / 16:9 / 3:2 / 9:16, X/Y/W/H, Full image / Center / Reset); the two stay in sync, one undo step per drag;
+  - output size with aspect lock or scale % (follows the crop unless set);
   - quality presets, or 2–256 colours with dithering on/off.
-- **Live summary:** output frame count, duration, size and warnings, updated on every edit (the file-size estimate comes in M3).
+- **Live summary:** output frame count, duration, dimensions and warnings, updated on every edit, plus an **estimated file size** ("Size: ≈ 1.2 MB") computed in the background from a few real output frames.
 - **Generate** in the background with progress and Cancel. Output uses a shared palette and lossless frame differencing, keeps the source's transparency and loop setting, is verified after writing, and replaces the destination atomically (a cancelled or failed run leaves it untouched).
 - **Save the current frame as PNG**, as in the source or with crop/size applied.
-- Not yet: the interactive crop rectangle and crop/resize preview (M3), the size estimate (M3), the `.exe` build (M5).
+- Not yet: hardening (input-limit UI, clearer corrupt-file messages, HiDPI and accessibility passes; M4) and the `.exe` build (M5).
 
 ## Run
 
@@ -52,13 +54,18 @@ scripts/test.sh tests/ui -k trim  # extra arguments go to pytest
 | Ctrl+O | Open GIF |
 | Ctrl+G | Generate |
 | Ctrl+Shift+S | Save current frame as PNG |
-| Ctrl+F4 | Close the GIF |
-| Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+W | Close the GIF |
+| Ctrl+Q | Quit |
+| Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | Undo / redo |
 | Del | Delete selected frame(s) (or the current frame) |
 | Ctrl+Shift+Del | Restore selected frame(s) (Insert also works in the filmstrip) |
 | I / O | Set trim start / end at the playhead |
 | Space | Play / pause |
-| P | Preview edits (play the edited timing) |
+| P | Preview edits: output timing **and** crop/resize on the canvas |
+| C | Crop tool: show/hide the crop rectangle (creates a 10% inset crop if there is none) |
+| Ctrl+Left / Right / Up / Down | Move the crop by 1 px (crop tool on) |
+| Ctrl+Shift+Left / Right / Up / Down | Narrow / widen / shorten / lengthen the crop by 1 px (crop tool on) |
+| Shift while dragging a crop handle | Keep the crop's aspect ratio |
 | Left / Right | Previous / next frame |
 | Shift+Left / Shift+Right | Back / forward 10 frames |
 | Home / End | First / last frame |
@@ -67,7 +74,7 @@ scripts/test.sh tests/ui -k trim  # extra arguments go to pytest
 | Ctrl+wheel, middle-drag | Zoom at the mouse, pan (canvas) |
 | Alt while dragging a trim handle | Don't snap to frame boundaries |
 
-Single-letter and arrow keys go to a spin box while one has focus, so you can type in it. Click the canvas or the filmstrip to use them as shortcuts again.
+Crop → Remove crop clears the crop (crop tool on). Single-letter and arrow keys go to a spin box while one has focus, so you can type in it. Click the canvas or the filmstrip to use them as shortcuts again.
 
 ## Documentation
 

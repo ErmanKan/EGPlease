@@ -63,6 +63,10 @@ generate(source, state, out_path, *, progress=None, cancel=None) -> GenerateResu
     # ValueError if the plan is empty; keeps source loop (None stays None);
     # verifies frame count + durations before os.replace
 export_frame_png(source, index, out_path, state=None) -> Path   # state -> crop+resize; atomic
+estimate_size(source, state, timeline, *, samples=ESTIMATE_SAMPLES=5) -> int
+    # bytes; 0 for an empty plan. Encodes a CONTIGUOUS middle run of real output frames as ONE
+    # stream in memory (write_stream) and extrapolates first + marginal_per_frame * (n - 1).
+    # Renders ~n/2 frames: call off the GUI thread (PreviewService does)
 
 # core/timeline.py
 OutputFrame(src_index, delay_cs); TimelinePlan(frames, duration_ms, warnings)
@@ -86,10 +90,13 @@ write_gif(frames: Iterable[tuple[Image, int]], path, *, loop: int | None = 0, to
     # lossless diff frames (changed rect, unchanged pixels transparent); 1st palette = global table;
     # loop=None -> no NETSCAPE block (plays once); verify(temp) runs before os.replace
 read_back(path) -> tuple[int, list[int]]                   # (frame_count, durations_ms)
-estimate_size(sample_frames, total_frames) -> int        # unused until M3 (size estimate)
+estimate_size(sample_frames, total_frames) -> int        # M1 helper; NOT used by the app (see pipeline.estimate_size)
+write_stream(fp, frames, *, loop=0, total=None, progress=None, cancel=None) -> int
+    # write_gif's encoder without the file: into any open binary stream (BytesIO); cancel is a
+    # callable that raises; returns the frame count; write_gif delegates to it
 ```
 
-## UI interfaces (contract, Milestone 2)
+## UI interfaces (contract, Milestones 2–3)
 ```python
 # ui/document.py: the hub. Widgets talk ONLY to Document, never to each other.
 Document(QObject)
@@ -106,13 +113,17 @@ Document(QObject)
 # ui/qt_image.py  pil_to_qimage(img) -> QImage ; checkerboard_brush(cell=8) -> QBrush
 
 # Widgets (M2). Constructor, key public API, outward signals.
-SettingsPanel(doc, parent=None)               # ui/settings_panel.py
+SettingsPanel(doc, parent=None, *, preview=None)   # ui/settings_panel.py; preview: PreviewService -> Size line
   signal generateRequested()                  # Generate button (enabled only if output has frames)
+  .crop_panel (CropPanel; its errorOccurred is shown in the summary card)
   .generate_button, .start_spin, .speed_spin, ... (public children, for tests only)
+  format_bytes(n) -> str                      # module function: '850 B', '12.4 KB', '3.21 MB' (1 KB = 1024 B)
 FrameCanvas(doc, parent=None)                 # ui/inspector/canvas.py (QGraphicsView, read-only)
   signal zoomChanged(float)
   .zoom .fit_mode .zoom_in() .zoom_out() .zoom_actual() .zoom_fit() .set_zoom(f)
-  .image_rect() .map_to_image(view_pos)       # scene coords == image pixels
+  .image_rect() .map_to_image(view_pos)       # scene coords == image pixels (OUTPUT pixels in geometry preview)
+  .image_item .set_preview(preview) .geometry_preview   # shows PreviewService frames while geometry is on;
+      # never requests frames itself (the service follows currentIndexChanged)
 TimeBar(doc, parent=None)                     # ui/inspector/timebar.py
   signal scrubbed(int)                        # while dragging the playhead
   .x_for_time(ms) .time_for_x(x) .handle_at(pos) -> "in"|"out"|None
@@ -128,11 +139,38 @@ TransportBar(doc, player, parent=None)        # ui/inspector/transport.py
   signal saveFrameRequested()
   .first_button .prev_button .play_button .next_button .last_button .preview_check .info_label
 Inspector(doc, player, parent=None)           # ui/inspector/inspector.py: .canvas .transport .timebar .filmstrip
-MainWindow(doc=None, parent=None)             # ui/main_window.py: owns Document + Player
+
+# Milestone 3
+CropPanel(doc, parent=None)                   # ui/crop_panel.py (inside SettingsPanel)
+  signal errorOccurred(str)                   # a crop edit was rejected (ValueError message)
+  .last_error .crop_group (checkable: unticked = no crop) .aspect_combo .x_spin .y_spin .w_spin .h_spin
+  .full_button .center_button .reset_button .status_label   # public children, for tests only; no public methods
+  ASPECTS, TIMES                              # module constants
+CropItem(doc, parent=None)                    # ui/inspector/crop_item.py (QGraphicsObject); the main window adds it
+                                              # to canvas.scene() at (0, 0): item coords == source image pixels
+  signals previewChanged(QRectF)              # live rect while dragging (no Document write until release)
+          cropActiveChanged(bool)             # doc.state.crop switched between None and set
+  .crop_active .tool_enabled .dragging .crop_rect() -> QRect .image_size() -> (w, h)
+  .set_tool_enabled(b)                        # off = hidden, ignores mouse AND nudge/resize/activate/reset
+  .handle_at(scene_pos) -> 'tl'|'t'|'tr'|'r'|'br'|'b'|'bl'|'l'|'move'|None
+  .nudge(dx, dy) .resize(dw, dh) .activate() .reset()   # one undo step each (merge_key=None)
+PreviewService(doc, parent=None, *, cache_size=32, debounce_ms=250)   # ui/inspector/preview.py (QObject)
+  signals frameReady(int, QImage), frameFailed(int, str), estimateChanged(), estimateReady(),
+          geometryChanged(bool)
+  .geometry_enabled (property, settable) .set_geometry_enabled(b)   # crop+resize preview on/off
+  .render_preview_frame(i) -> QImage          # synchronous; .request_frame(i) -> async frameReady
+  .estimated_bytes -> int|None .estimate_pending -> bool .refresh_estimate() .dispose()
+      # pool work gets the geometry captured at request time; stale results dropped by generation
+
+MainWindow(doc=None, parent=None)             # ui/main_window.py: owns Document, Player, PreviewService, CropItem
   .open_file(path) .generate_to(path) .cancel_generate() .save_frame_to(path, with_edits=False)
   .trim_in_here() .trim_out_here() .reset_trim() .show_error(msg) .is_busy .last_error .last_result
-  .act_* (QActions; shortcuts are window-wide)
+  .preview .crop_item .settings .inspector
+  .act_* (QActions; shortcuts are window-wide): act_preview (P: timing AND geometry), act_crop_tool (C),
+      act_crop_reset, act_crop_nudge[4] (Ctrl+arrows), act_crop_resize[4] (Ctrl+Shift+arrows)
 ```
+Merge-key rule: `SetStateCommand` merges ANY consecutive commands with the same key, so keys are per gesture. Spinbox scrubbing uses a fixed key per setting (`"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"`, `"crop"`); each drag uses a fresh key per press (`"trim-drag-N"`, `"crop-drag-N"`) so a drag never merges with the next drag or with a following spinbox edit; discrete actions (buttons, menu items, nudges, toggles) pass `None`. Never reuse a spinbox key for a drag.
+
 Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels).
 
 ## Documentation (required, part of done)

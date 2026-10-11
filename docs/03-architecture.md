@@ -1,6 +1,6 @@
 # 03 — Architecture (the code as it is today)
 
-This page describes the code on `main` as of the end of Milestone 2 (window and inspector). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
+This page describes the code on `main` as of the end of Milestone 3 (crop and live preview). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
 
 ## 1. Layers
 
@@ -8,7 +8,8 @@ This page describes the code on `main` as of the end of Milestone 2 (window and 
 flowchart TB
     subgraph UI["ui/ (PySide6, GUI thread)"]
         MW["MainWindow<br/>menus · shortcuts · open · Generate · Save frame"]
-        W["widgets<br/>settings panel · canvas · timebar · filmstrip · transport · player"]
+        W["widgets<br/>settings panel (+ crop panel) · canvas (+ crop item) · timebar · filmstrip · transport · player"]
+        PS["PreviewService<br/>preview frames · size estimate"]
         DOC[Document<br/>hub: source, EditState, undo, current frame, selection]
         CMD[SetStateCommand<br/>QUndoStack]
         WK[run_async<br/>QThreadPool]
@@ -19,11 +20,15 @@ flowchart TB
         DEC[decoder<br/>GifSource]
         TL[timeline<br/>plan_output]
         REN[render<br/>crop · resize · palette · quantize]
-        ENC[encoder<br/>write_gif]
-        PIPE[pipeline<br/>plan · summarize · generate · export PNG]
+        ENC[encoder<br/>write_gif · write_stream]
+        PIPE[pipeline<br/>plan · summarize · estimate_size · generate · export PNG]
         ST[selftest]
     end
     MW -->|composes, wires actions| W
+    MW -->|owns| PS
+    PS -->|frames, size| W
+    PS --> WK
+    PS -->|estimate_size| PIPE
     MW -->|set_source · close · undo_stack| DOC
     W -->|calls / signals| DOC
     MW --> WK
@@ -65,8 +70,8 @@ gif-editor/
 │  │  ├─ decoder.py               GifSource: block parser, numpy compositor (browser disposal), LRU + checkpoints
 │  │  ├─ timeline.py              plan_output(): trim → delete → speed → fps → min delay → cs rounding → split
 │  │  ├─ render.py                crop, premultiplied LANCZOS resize, shared palette, quantize (anti-shimmer)
-│  │  ├─ encoder.py               write_gif(): own container, lossless diff frames, atomic, progress/cancel/verify
-│  │  ├─ pipeline.py              plan/summarize/generate/export_frame_png glue
+│  │  ├─ encoder.py               write_gif()/write_stream(): own container, lossless diff frames, atomic, progress/cancel/verify
+│  │  ├─ pipeline.py              plan/summarize/estimate_size/generate/export_frame_png glue
 │  │  └─ selftest.py              round trip through the Pillow internals we depend on
 │  └─ ui/
 │     ├─ __init__.py              package marker
@@ -74,11 +79,14 @@ gif-editor/
 │     ├─ commands.py              SetStateCommand (old → new EditState, gesture merging)
 │     ├─ workers.py               run_async(): QThreadPool + GUI-thread callbacks
 │     ├─ qt_image.py              pil_to_qimage(), checkerboard_brush()
-│     ├─ settings_panel.py        SettingsPanel: timing/size/quality, live summary, Generate button
-│     ├─ main_window.py           MainWindow: layout, actions/shortcuts, open, Generate, Save frame
+│     ├─ settings_panel.py        SettingsPanel: timing/size/crop/quality, live summary + size estimate, Generate button
+│     ├─ crop_panel.py            CropPanel: numeric Crop group (embedded in the settings panel)
+│     ├─ main_window.py           MainWindow: layout, actions/shortcuts, Crop menu, open, Generate, Save frame
 │     └─ inspector/
 │        ├─ __init__.py           package marker
-│        ├─ canvas.py             FrameCanvas: zoomable/pannable frame view, deleted overlay
+│        ├─ canvas.py             FrameCanvas: zoomable/pannable frame view, deleted overlay, geometry preview
+│        ├─ crop_item.py          CropItem: draggable crop rectangle in the canvas scene
+│        ├─ preview.py            PreviewService: off-thread preview frames + debounced size estimate (QObject)
 │        ├─ timebar.py            TimeBar: playhead, ticks, snapping trim handles
 │        ├─ filmstrip.py          Filmstrip: lazy thumbnails, selection, delete/restore, trim menu
 │        ├─ transport.py          TransportBar: play/step buttons, preview toggle, frame info
@@ -89,7 +97,7 @@ gif-editor/
    ├─ gifgen.py                   simple GIFs via Pillow
    ├─ corpus.py                   raw GIF89a writer + reference compositor + 13 entries
    ├─ core/test_*.py              one per core module + corpus tests
-   └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, one file per widget, main-window integration
+   └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, one file per widget, main-window + M3 integration
 ```
 
 ## 3. End-to-end data flow: open → edit → preview → generate
@@ -117,10 +125,14 @@ sequenceDiagram
     V->>D: summary() → pipeline.summarize → timeline.plan_output
     V-->>U: "Frames 120 → 61 · 3.2 s · 480×270"
 
+    D-->>V: stateChanged → PreviewService: debounce 250 ms → pool: estimate_size
+    WK-->>V: estimateReady → summary card "Size: ≈ 1.2 MB"
+
     U->>V: scrub / play
     V->>D: set_current_index(i)
     D-->>V: currentIndexChanged(i)
-    V->>WK: source.frame(i) or thumbnail(i) → pil_to_qimage
+    V->>WK: thumbnail(i) → pil_to_qimage (filmstrip)
+    Note over V: canvas: source.frame(i) on the GUI thread (cache hit),<br/>or, with Preview edits on, PreviewService renders<br/>crop + resize on the pool → frameReady(i, QImage)
     WK-->>V: QImage → QPixmap (GUI thread) → paint
 
     U->>MW: Generate
@@ -129,7 +141,7 @@ sequenceDiagram
     WK-->>MW: on_progress(done, total) …, on_done(GenerateResult) / on_error
 ```
 
-The **same** `timeline.plan_output` result drives the summary, the (M3) edited preview and Generate. That is why the preview can be guaranteed to match the output. Inside Generate, per frame:
+The **same** `timeline.plan_output` result drives the summary, the edited preview (timing) and Generate, and the same `render.render_frame(crop, size)` produces the preview frame and the Generate frame before quantisation. That is why the preview matches the output. The size estimate also runs the real pipeline (on a few frames), but it is an estimate: see [pipeline](codebase/src/gif_editor/core/pipeline.md#estimate_size-and-_encoded_size). Inside Generate, per frame:
 
 ```mermaid
 flowchart LR
@@ -157,12 +169,12 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Thread | Does | Must not |
 |---|---|---|
 | GUI thread | all widgets, `Document`, undo stack, `QPixmap` creation, painting, `summarize()` (cheap), the canvas's `source.frame(i)` (a cache hit for typical GIFs), Save frame's `export_frame_png` (one frame) | block more than about 16 ms: no `GifSource.open`, no `generate`, no bulk decoding |
-| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open` (main window), `thumbnail()` batches + `pil_to_qimage` (filmstrip), `generate` (main window) | touch widgets or `Document`, create `QPixmap` |
+| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open` (main window), `thumbnail()` batches + `pil_to_qimage` (filmstrip), `generate` (main window), preview frames (`frame` + `render_frame` + `pil_to_qimage`) and `estimate_size` (`PreviewService`) | touch widgets or `Document`, create `QPixmap` |
 
 - `run_async(fn, *, on_done, on_error, on_progress, pool=None)` creates a `_Relay` QObject **on the calling (GUI) thread**. The worker emits its signals, and Qt queues them back to the GUI thread. Call it only from the GUI thread.
 - `GifSource` is **thread-safe**: one lock per source guards decoding and the cache. `frame()` returns copies. Concurrent requests on one source are serialised, not parallel.
 - **Cancellation** is cooperative: pass a `threading.Event` to `generate(..., cancel=ev)`. The encoder checks it between frames and before committing, and raises `encoder.Cancelled`, which arrives as `on_error`.
-- Results come back in completion order. Widgets must ignore stale results (e.g. a thumbnail for a frame no longer needed, or a source that has since been closed).
+- Results come back in completion order. Widgets must ignore stale results (e.g. a thumbnail for a frame no longer needed, or a source that has since been closed). `PreviewService` uses a generation counter per work stream, and its render worker receives the crop/size **captured at request time** as arguments: reading the live state on the pool thread would let an edit made mid-render leak into an image labelled with the old request (fixed in `e904982`).
 
 ## 6. Where each plan decision is implemented
 
@@ -187,7 +199,9 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Loop: keep source behaviour | `pipeline.generate(loop=meta.loop)`, `encoder._write_header` |
 | Safe write (temp + rename), progress, cancel, verify | `encoder.write_gif`, `pipeline._verifier` |
 | Save current frame as PNG (original or edited) | `pipeline.export_frame_png(state=None|state)` via `MainWindow.save_frame_to` |
-| Live summary | `pipeline.summarize` (exact), shown by the settings panel; a file-size estimate (`encoder.estimate_size`) is unused until M3 |
+| Live summary | `pipeline.summarize` (exact), shown by the settings panel; file-size estimate `pipeline.estimate_size` via `PreviewService` (debounced, off-thread), shown as "Size: ≈ …" |
+| Preview toggle: timing + geometry (§2.6) | "Preview edits" (P): `Player.set_preview_edits` (timing) + `PreviewService.set_geometry_enabled` (canvas shows crop + resize) |
+| Crop: draggable rectangle + numeric fields in sync | `CropItem` (canvas) and `CropPanel` (settings panel), both writing `doc.state.crop` |
 | Large GIFs / RAM | `decoder.Limits`, `_FrameCache` (LRU + pinned checkpoints ≤ ¼ budget) |
 | Fast backward scrubbing | keyframe checkpoints + `_resume_point` |
 | Pillow pinned, internals checked | `pyproject.toml` pins, `core/selftest.py` |
@@ -215,7 +229,9 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Worker exception | `on_error(message, exc)` on the GUI thread + traceback on stderr | `ui/workers.py` |
 | Open fails (any exception) | non-blocking "Open failed" box + `last_error`; the previous document stays open | `MainWindow.open_file` |
 | Generate fails / cancelled | "Generate failed" box, or a status-bar "cancelled" message; destination untouched | `MainWindow.generate_to` |
-| Edit refused by a widget (delete all, trim end before start) | `Filmstrip.errorOccurred` / `show_error`; settings panel shows it in its summary card | `filmstrip.py`, `settings_panel.py`, `main_window.py` |
+| Edit refused by a widget (delete all, trim end before start, invalid crop) | `Filmstrip.errorOccurred` / `show_error`; the settings panel shows its own and the crop panel's (`CropPanel.errorOccurred`) in its summary card; `CropItem` silently re-syncs from the document | `filmstrip.py`, `settings_panel.py`, `crop_panel.py`, `crop_item.py`, `main_window.py` |
+| Size estimate fails or the state is invalid | no Size line (never an error dialog) | `PreviewService._estimate_job`, `_start_estimate` |
+| Preview frame render fails | `PreviewService.frameFailed(i, message)`; the canvas keeps the previous image | `preview.py` |
 
 ## 8. Extension points: adding a new edit type end to end
 
@@ -234,39 +250,54 @@ Example: a hypothetical *Reverse* toggle (play frames backwards). The same steps
    - UI: a pytest-qt test that the control calls `apply`, and that undo restores it.
 6. **Docs:** update the module page(s), this page's table in §6 if it is a plan decision, the AGENTS.md interface block (orchestrator), and the INDEX line if a file was added.
 
-## 9. M2 UI structure
+## 9. UI structure (M2 + M3)
 
 ### Widget tree and ownership
 ```mermaid
 flowchart TB
-    MW["MainWindow (QMainWindow)<br/>owns Document + Player · actions · dialogs"]
+    MW["MainWindow (QMainWindow)<br/>owns Document, Player, PreviewService, CropItem<br/>actions · Crop menu · dialogs"]
     SP["QSplitter (horizontal)"]
     SA["QScrollArea"]
     SET["SettingsPanel"]
+    CP["CropPanel (Crop group)"]
     INS["Inspector (QVBoxLayout)"]
     CV["FrameCanvas (stretch 1)"]
+    SC[("canvas scene<br/>pixmap item · CropItem")]
     TR["TransportBar"]
     TB["TimeBar"]
     FS["Filmstrip"]
     DOC[("Document (QObject)")]
     PL[("Player (QObject, no widget)")]
+    PS[("PreviewService (QObject, no widget)")]
     MW --> SP
-    SP --> SA --> SET
+    SP --> SA --> SET --> CP
     SP --> INS
     INS --> CV & TR & TB & FS
+    CV --- SC
     MW -. owns .-> DOC
     MW -. owns .-> PL
+    MW -. owns .-> PS
+    MW -.->|"creates, addItem()"| SC
     TR -. drives .-> PL
+    PS -.->|"frameReady (QImage)"| CV
+    PS -.->|"estimated_bytes"| SET
+    PL -.->|"previewEditsChanged → set_geometry_enabled"| PS
 ```
-- `MainWindow` creates the one `Document` and the one `Player`, then the `SettingsPanel` (inside a `QScrollArea`, so it scrolls instead of being squashed) and the `Inspector`, which builds its four children with the same `doc` (and gives the transport the `player`).
+- `MainWindow` creates the one `Document`, the one `Player` and the one `PreviewService`, then the `SettingsPanel` (inside a `QScrollArea`, so it scrolls instead of being squashed; it receives `preview=`) and the `Inspector`, which builds its four children with the same `doc` (and gives the transport the `player`).
 - The `Player` is not a widget. The window owns it because two things drive it: the transport buttons and the window's keyboard actions.
-- The window is the only code that reaches into widgets, and only to **wire** them: actions call widget methods (`filmstrip.delete_selected`, `canvas.zoom_fit`, `player.step`), and four outward signals come back (`SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred`, `FrameCanvas.zoomChanged`). Widgets never call each other. Details: [main_window page](codebase/src/gif_editor/ui/main_window.md).
+- **`PreviewService` (M3) is a non-visual service owned by the main window.** It reads `Document` and feeds two widgets: the **canvas** (rendered output frames, via `canvas.set_preview(preview)` and `frameReady`) and the **settings panel** (the size estimate, via `SettingsPanel(doc, preview=preview)` and `estimated_bytes`). Neither widget owns or drives it; the window's P action does, through the `Player`. It lives in the window because it has two consumers, exactly like the `Player`.
+- **`CropItem` (M3) lives in the canvas scene**, where scene coordinates are source image pixels. The main window creates it and adds it with `canvas.scene().addItem(...)`; `FrameCanvas` has no crop code. The window also owns the crop tool action and decides visibility (hidden during "Preview edits").
+- **`CropPanel` (M3) lives inside the settings panel** (`settings.crop_panel`, between Output size and Quality). The settings panel only forwards its `errorOccurred` into the summary card.
+- **`CropItem` and `CropPanel` never talk to each other.** Both write `doc.state.crop` through `Document.apply`, and both refresh from `stateChanged`. A canvas drag moves the spinboxes and a spinbox edit moves the rectangle only because both follow the document.
+- The window is the only code that reaches into widgets, and only to **wire** them: actions call widget methods (`filmstrip.delete_selected`, `canvas.zoom_fit`, `player.step`, `crop_item.nudge`), and outward signals come back (`SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred`, `FrameCanvas.zoomChanged`, `CropItem.cropActiveChanged`/`previewChanged`, `PreviewService.geometryChanged`). Widgets never call each other. Details: [main_window page](codebase/src/gif_editor/ui/main_window.md).
 
 ### How signals flow through `Document`
 ```mermaid
 flowchart LR
     subgraph writers["Widgets write (method calls)"]
         SETw["SettingsPanel<br/>apply · set_trim"]
+        CPw["CropPanel<br/>apply(crop)"]
+        CIw["CropItem<br/>apply(crop) on release / nudge / resize"]
         TBw["TimeBar<br/>set_current_index · set_trim"]
         FSw["Filmstrip<br/>set_current_index · set_selection<br/>delete/restore_frames · set_trim"]
         PLw["Player<br/>set_current_index"]
@@ -274,9 +305,9 @@ flowchart LR
     end
     D(("Document"))
     subgraph readers["Widgets react (signals)"]
-        R1["sourceChanged → everyone refreshes fully"]
-        R2["stateChanged → SettingsPanel, TimeBar, Filmstrip,<br/>FrameCanvas (overlay), TransportBar (label), Player (resync)"]
-        R3["currentIndexChanged → FrameCanvas, TimeBar,<br/>Filmstrip, TransportBar, Player"]
+        R1["sourceChanged → everyone refreshes fully<br/>(PreviewService drops caches; window turns the crop tool off)"]
+        R2["stateChanged → SettingsPanel, CropPanel, CropItem, TimeBar, Filmstrip,<br/>FrameCanvas (overlay), TransportBar (label), Player (resync),<br/>PreviewService (re-render on crop/size change, re-estimate)"]
+        R3["currentIndexChanged → FrameCanvas, TimeBar,<br/>Filmstrip, TransportBar, Player, PreviewService (if geometry on)"]
         R4["selectionChanged → Filmstrip"]
     end
     writers --> D --> readers
@@ -284,43 +315,61 @@ flowchart LR
 Example: the user clicks a thumbnail while playing.
 1. `Filmstrip` → `doc.set_current_index(5)` (guarded by `_syncing` so its own echo is ignored).
 2. `Document` emits `currentIndexChanged(5)`.
-3. `FrameCanvas` shows frame 5; `TimeBar` moves the playhead; `TransportBar` updates "Frame 6 / N"; `Player` sees an index change it did not cause and **resumes playback from frame 5** with a fresh timing base.
+3. `FrameCanvas` shows frame 5 (or, with Preview edits on, waits for the `PreviewService` render of frame 5); `TimeBar` moves the playhead; `TransportBar` updates "Frame 6 / N"; `Player` sees an index change it did not cause and **resumes playback from frame 5** with a fresh timing base.
 4. The filmstrip's own `_on_doc_current` moves the current item with `NoUpdate`, so the **selection is not changed** by the playhead.
 
-Edits go the same way: `doc.apply(...)` → `SetStateCommand` → `stateChanged(new)`, and every view redraws from `doc.state`. Undo/redo emit the same signal, so controls, timebar handles and filmstrip marks all follow undo without extra code. To avoid feedback loops, a widget that both writes and listens either blocks its own signals while refreshing (settings panel) or uses a re-entrancy guard (filmstrip `_syncing`, player `_setting_index`).
+Edits go the same way: `doc.apply(...)` → `SetStateCommand` → `stateChanged(new)`, and every view redraws from `doc.state`. Undo/redo emit the same signal, so controls, timebar handles, filmstrip marks, the crop rectangle and the crop spinboxes all follow undo without extra code. To avoid feedback loops, a widget that both writes and listens either blocks its own signals while refreshing (settings panel, crop panel) or uses a re-entrancy guard (filmstrip `_syncing`, player `_setting_index`); `CropItem` ignores `stateChanged` mid-drag and re-reads the document on release.
+
+### Merge keys: one undo step per gesture
+`SetStateCommand` merges **any** two consecutive commands with the same `merge_key` into one undo step ([commands page](codebase/src/gif_editor/ui/commands.md)). Keys are therefore chosen per *gesture*, not per field:
+
+| Writer | Key | Result |
+|---|---|---|
+| Settings panel spinboxes / slider | `"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"` | holding an arrow or dragging the slider = one step |
+| Crop panel spinboxes | `"crop"` | scrubbing X/Y/W/H = one step |
+| Each canvas crop drag (`CropItem`) | `"crop-drag-N"`, N incremented on every press | one drag = one step; two drags = two steps |
+| Each timebar handle drag | `"trim-drag-N"` | same pattern as the crop drag |
+| Buttons, menu actions, crop nudges/resizes (Ctrl+arrows), Crop tick/untick, activate (C), Remove crop, I/O | `None` | every click or key press is its own step |
+
+**Why the drag key is not `"crop"`.** A drag writes once, on release. If it used `"crop"`, a spinbox edit right after the drag would merge into the drag's undo step (undo would revert both), and two drags in a row would also become one step. A fresh key per press makes the drag its own step and guarantees it merges with nothing. Discrete actions use `None` (Qt id −1, never merges) so a nudge can never fold into a preceding drag or scrub.
 
 ### Per-widget roles
 | Widget | File | Listens to | Calls on `Document` | Notes |
 |---|---|---|---|---|
-| Settings panel | `ui/settings_panel.py` | `sourceChanged`, `stateChanged` | `apply(..., merge_key=<per control>)`, `set_trim(..., "trim")`, `summary()` | Live summary + warnings; Generate button disabled when the output is empty. A size equal to the base size is stored as `None` ("follow the crop"). |
-| Frame canvas | `ui/inspector/canvas.py` | `sourceChanged`, `currentIndexChanged`, `stateChanged` | none (read-only) | Scene coordinates = image pixels (ready for the M3 crop rectangle). Ctrl+wheel zoom, middle-drag pan. |
+| Settings panel | `ui/settings_panel.py` | `sourceChanged`, `stateChanged`; `PreviewService.estimateChanged/estimateReady`; `CropPanel.errorOccurred` | `apply(..., merge_key=<per control>)`, `set_trim(..., "trim")`, `summary()` | Live summary + Size line + warnings; Generate button disabled when the output is empty. A size equal to the base size is stored as `None` ("follow the crop"). |
+| Crop panel | `ui/crop_panel.py` | `sourceChanged`, `stateChanged` | `apply(state.with_(crop=…), …, "crop" \| None)` | Checkable group: unticked = no crop, inputs greyed ("tick to crop"); ticking a full-frame default makes an 80 % centred crop. |
+| Frame canvas | `ui/inspector/canvas.py` | `sourceChanged`, `currentIndexChanged`, `stateChanged`; `PreviewService.frameReady/geometryChanged` | none (read-only) | Scene coordinates = image pixels (output pixels in geometry mode). Ctrl+wheel zoom, middle-drag pan. |
+| Crop item | `ui/inspector/crop_item.py` | `sourceChanged`, `stateChanged` | `apply(state.with_(crop=…), …, "crop-drag-N" \| None)` | No document write mid-drag; edits only while the tool is on. |
+| Preview service | `ui/inspector/preview.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | none; reads `plan()` | Not a widget. Pool renders with captured geometry, LRU cache, debounced estimate. |
 | Transport | `ui/inspector/transport.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`; `Player.playingChanged`/`previewEditsChanged` | none (drives the `Player`) | Shortcuts live in the window; "Save frame…" just emits a signal. |
 | Timebar | `ui/inspector/timebar.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | `set_current_index`, `set_trim(..., "trim-drag-N")` | Handles snap to frame boundaries (earlier boundary on a tie), Alt = free; one undo step per drag. |
 | Filmstrip | `ui/inspector/filmstrip.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`, `selectionChanged` | `set_current_index`, `set_selection`, `delete_frames`, `restore_frames`, `set_trim(..., None)` | Thumbnails in batches of 32 via `run_async`, stale batches dropped by generation number. |
 | Player | `ui/inspector/player.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | `set_current_index`; reads `plan()` in preview mode | Ideal-timeline scheduling (no drift), skips late frames, rebases after a stall longer than one loop. |
 | Inspector | `ui/inspector/inspector.py` | — | — | Composition only. |
-| Main window | `ui/main_window.py` | `sourceChanged` | `set_source`, `close`, `set_trim(..., None)`, `plan()`, `undo_stack` | Async open + drag-drop, Generate with progress/cancel, Save frame, busy flags. |
+| Main window | `ui/main_window.py` | `sourceChanged`; `CropItem.cropActiveChanged/previewChanged`; `PreviewService.geometryChanged`; `Player.previewEditsChanged` | `set_source`, `close`, `set_trim(..., None)`, `plan()`, `undo_stack` | Async open + drag-drop, Generate with progress/cancel, Save frame, busy flags, crop tool rules. |
 
 Shared widget rules (AGENTS.md):
-- construct with `(doc, parent=None)` (the transport and inspector also take the `player`);
+- construct with `(doc, parent=None)` (the transport and inspector also take the `player`; the settings panel optionally `preview=`);
 - refresh fully on `sourceChanged`;
 - show a disabled/empty state when `doc.is_open` is False;
 - never block the GUI thread for more than about 16 ms;
-- use `merge_key` for continuous gestures;
+- use `merge_key` for continuous gestures (per-gesture keys, table above);
 - `setAccessibleName` on custom widgets;
 - HiDPI-safe painting (cosmetic pens, logical pixels).
 
-### Known UI limitations (M2)
+### Known UI limitations (after M3)
 - **Space** is the window's play/pause shortcut, so the canvas's Space+drag pan never sees the key; **middle-drag** pans.
-- Window-level arrow and Home/End shortcuts are skipped when the focused widget accepts `ShortcutOverride` for them (the settings panel's spin boxes; the filmstrip claims Delete/Backspace/Insert and handles them itself).
-- Preview plays edited **timing** only. Crop/resize preview and the crop rectangle come in M3.
+- Window-level arrow and Home/End shortcuts are skipped when the focused widget accepts `ShortcutOverride` for them (the settings and crop panels' spin boxes; the filmstrip claims Delete/Backspace/Insert and handles them itself).
+- **Crop actions need the crop tool.** "Remove crop" and the Ctrl+arrow nudge/resize actions are enabled whenever a file is open, but do nothing while the tool is off or hidden by "Preview edits" (`CropItem._can_edit()` requires the tool). The crop panel always works.
+- In geometry preview the crop cannot be edited on the canvas (the rectangle is hidden, because the shown image is already cropped).
 
 ## Known drift between docs and code
 
 Things noticed while writing these docs. The code is the truth.
-- `scripts/fetch-devlibs.sh`'s header comment lists the full Debian trust chain as if the script checked it; the script enforces only the pinned SHA-256. The docs ([fetch-devlibs page](codebase/scripts/fetch-devlibs.md#trust-chain), AGENTS.md, [06-testing](06-testing.md#headless-qt-and-the-project-local-libegl)) say what is actually checked and record the one-time manual verification. The script comment itself is code and was left as is.
 - `docs/02-plan.md` is the original plan and is not rewritten; where the code deviates, see its [Implementation notes (deviations)](02-plan.md#implementation-notes-deviations).
-- `encoder.estimate_size` exists and is tested, but nothing calls it until M3 (the summary shows no size estimate yet).
+- `pipeline.estimate_size`'s docstring starts with "the first frame plus `samples − 1` evenly spaced frames … `first + average_per_frame × (count − 1)`", but the code (and the docstring's second paragraph) encode a **contiguous middle run** and extrapolate from the run's own first frame. It also says it "encodes a handful of frames"; it encodes `k` frames but renders and quantizes every output frame up to the end of the run (about half the GIF). See the [pipeline page](codebase/src/gif_editor/core/pipeline.md#invariants--gotchas).
+- `encoder.estimate_size` (the M1 helper) is still exported and tested but no longer used by the app; the summary uses `pipeline.estimate_size`. `encoder.write_stream` is public but missing from `encoder.__all__`.
+- "Remove crop" and the Ctrl+arrow crop actions are enabled while the crop tool is off but have no effect then (see §9 limitations).
 - `Document.set_trim` defaults to `merge_key="trim"`. That is intended for spinbox scrubbing (the settings panel); drag and menu callers pass their own key (`"trim-drag-N"`) or `None`. Calling it without a key from a new discrete action would silently merge with the previous trim step.
 
-Fixed at the end of M2 (kept here for reference): `app.py` now calls `run_selftest`; `Document.close()` now emits `currentIndexChanged`/`selectionChanged`; the decoder docstring now names the instance method `Image.Image.frombytes`; AGENTS.md now lists `run_async(pool=)`, the full pipeline API and the per-widget interfaces; README.md shows the M2 status.
+Fixed since M2 (kept here for reference): `app.py` now calls `run_selftest`; `Document.close()` now emits `currentIndexChanged`/`selectionChanged`; the decoder docstring now names the instance method `Image.Image.frombytes`; AGENTS.md lists `run_async(pool=)`, the full pipeline API and the per-widget interfaces; `scripts/fetch-devlibs.sh`'s header comment now says it checks only the pinned SHA-256 and how the pin was obtained (`76cd65c`); `encoder.estimate_size` is no longer "unused until M3" because M3 uses `pipeline.estimate_size` instead.
