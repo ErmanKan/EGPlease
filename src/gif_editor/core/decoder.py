@@ -119,7 +119,27 @@ class SourceMeta:
 
 
 class GifLoadError(Exception):
-    """The file cannot be loaded as a GIF (missing, not a GIF, too large, corrupt...)."""
+    """The file cannot be loaded as a GIF (missing, not a GIF, too large, corrupt...).
+
+    ``str(err)`` is a precise technical message (shown under "Details" in the UI and matched
+    by tests). ``kind`` says *why*, so the UI can explain it in plain words without parsing
+    the text. ``info`` holds the numbers that explanation needs (sizes, limits).
+    """
+
+    #: Possible ``kind`` values.
+    NOT_FOUND = "not_found"  # no such path
+    IS_DIRECTORY = "is_directory"  # the path is a folder
+    UNREADABLE = "unreadable"  # OS error while reading (permissions, locked, disk error)
+    EMPTY = "empty"  # zero-byte file
+    NOT_GIF = "not_gif"  # wrong signature: some other format, or junk
+    TOO_LARGE = "too_large"  # canvas over the pixel or side limit
+    TOO_MANY_FRAMES = "too_many_frames"  # over Limits.max_frames
+    MALFORMED = "malformed"  # a GIF, but broken (truncated header, bad frame, no frames)
+
+    def __init__(self, message: str, kind: str = MALFORMED, **info: object) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.info = info
 
 
 def _effective_delay(delay_ms: int) -> int:
@@ -170,7 +190,10 @@ def _make_lut(table: bytes | None) -> np.ndarray:
 def _read_header(data: bytes, name: str) -> tuple[int, int, int, int]:
     """Validate the signature; return (width, height, logical-screen flags, header end)."""
     if len(data) < 6 or data[:6] not in (b"GIF87a", b"GIF89a"):
-        raise GifLoadError(f"Not a GIF file: {name}")
+        raise GifLoadError(
+            f"Not a GIF file: {name}",
+            GifLoadError.EMPTY if not data else GifLoadError.NOT_GIF,
+        )
     if len(data) < 13:
         raise GifLoadError(f"No decodable frames in {name}: header is truncated")
     width = int.from_bytes(data[6:8], "little")
@@ -222,11 +245,19 @@ def _parse(data: bytes, name: str, limits: Limits) -> _Parsed:
     if max_pixels is not None and width * height > 2 * max_pixels:
         raise GifLoadError(
             f"Image is too large to open safely: {width}x{height} = {width * height} pixels "
-            f"exceeds the limit of {2 * max_pixels}"
+            f"exceeds the limit of {2 * max_pixels}",
+            GifLoadError.TOO_LARGE,
+            width=width,
+            height=height,
+            max_side=limits.max_canvas_side,
         )
     if max(width, height) > limits.max_canvas_side:
         raise GifLoadError(
-            f"Canvas {width}x{height} exceeds the maximum side of {limits.max_canvas_side} px"
+            f"Canvas {width}x{height} exceeds the maximum side of {limits.max_canvas_side} px",
+            GifLoadError.TOO_LARGE,
+            width=width,
+            height=height,
+            max_side=limits.max_canvas_side,
         )
 
     warnings: list[str] = []
@@ -299,7 +330,11 @@ def _parse(data: bytes, name: str, limits: Limits) -> _Parsed:
             data_start = pos + 1
             pos = _skip_sub_blocks(data, data_start)
             if len(frames) >= limits.max_frames:
-                raise GifLoadError(f"GIF has more than {limits.max_frames} frames")
+                raise GifLoadError(
+                    f"GIF has more than {limits.max_frames} frames",
+                    GifLoadError.TOO_MANY_FRAMES,
+                    max_frames=limits.max_frames,
+                )
             disposal, delay, transparent = gce if gce is not None else (0, 0, None)
             gce = None
             frames.append(
@@ -554,13 +589,15 @@ class GifSource:
     @classmethod
     def open(cls, path: str | Path, limits: Limits = Limits()) -> GifSource:  # noqa: B008
         path = Path(path)
+        if path.is_dir():
+            raise GifLoadError(f"Is a folder, not a file: {path}", GifLoadError.IS_DIRECTORY)
         if not path.is_file():
-            raise GifLoadError(f"File not found: {path}")
+            raise GifLoadError(f"File not found: {path}", GifLoadError.NOT_FOUND)
         try:
             with path.open("rb") as fp:
                 data = fp.read()
         except OSError as e:
-            raise GifLoadError(f"Cannot read {path.name}: {e}") from e
+            raise GifLoadError(f"Cannot read {path.name}: {e}", GifLoadError.UNREADABLE) from e
         parsed = _parse(data, path.name, limits)
         return cls._index(data, parsed, path, limits)
 

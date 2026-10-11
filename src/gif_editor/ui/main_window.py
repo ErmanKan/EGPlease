@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         # ---- layout: settings (scrollable) | inspector
         self.settings = SettingsPanel(self.doc, preview=self.preview)
         scroll = QScrollArea()
+        scroll.setAccessibleName("Output settings")
         scroll.setWidget(self.settings)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

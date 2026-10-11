@@ -72,6 +72,7 @@ class CropPanel(QWidget):
         #: The last rejected crop message, or None. Cleared by the next accepted change.
         self.last_error: str | None = None
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setAccessibleName("Crop settings")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

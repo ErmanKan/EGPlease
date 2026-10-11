@@ -18,6 +18,7 @@ class Inspector(QWidget):
 
     def __init__(self, doc: Document, player: Player, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setAccessibleName("Frame inspector")
         self.canvas = FrameCanvas(doc, self)
         self.transport = TransportBar(doc, player, self)
         self.timebar = TimeBar(doc, self)
