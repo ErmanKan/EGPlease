@@ -29,7 +29,6 @@ The M3 snapshot of `preview.py` mentioned in the previous version of this note w
 M4 exit criteria ([02-plan.md §6](02-plan.md#6-milestones)): large and corrupt fixtures don't freeze or crash the app; works at 150 % and 200 % scaling. (Background Generate with progress and cancel, also listed under M4 in the plan, was already done in M2.)
 
 Known issues to pick up during M4 (listed in [03-architecture §9](03-architecture.md#known-ui-limitations-after-m3) and the dev log):
-- "Remove crop" and the Ctrl+arrow crop actions are enabled while the crop tool is off but do nothing then.
 - Space+drag pan is shadowed by the Space play/pause shortcut (middle-drag works).
 - The size estimate can be low (0.67×) on long GIFs whose middle is unrepresentative.
 

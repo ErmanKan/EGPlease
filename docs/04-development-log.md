@@ -167,8 +167,14 @@ On resume:
 ### Process note: never move a worker's file aside
 To run the test suite while a worker was still busy, the orchestrator once moved that worker's in-progress file out of the way. That was a mistake: the worker was still writing the file, so the move raced with it. **Lesson:** to exclude a file that is still being written, pass `--ignore=<path>` to pytest (`scripts/test.sh --ignore=tests/ui/test_x.py`) and leave the file alone.
 
+### Fixes after the documentation pass
+The docs worker checked every claim against the code and found two real problems, both fixed by the orchestrator with regression tests:
+1. **Crop actions that looked usable but did nothing.** "Remove crop" and the Ctrl+arrow nudge/resize actions were enabled whenever a file was open, but `CropItem` ignored them while the tool was off or hidden by "Preview edits". Now nudge/resize are enabled only while the rectangle is visible, and "Remove crop" works regardless of the tool (removing a crop set from the panel must not require showing the rectangle).
+2. **The estimate rendered half the GIF.** `iter_output_frames` is a sequential generator, so reaching the middle sample run rendered and quantized every frame before it. `estimate_size` now slices the timeline to the run (`dataclasses.replace(timeline, frames=...)`), so it renders only the 5 run frames plus up to 16 palette samples, whatever the GIF's length. A test counts the rendered frames on a 200-frame GIF. The docstring, which still described an older "evenly spaced" algorithm, was rewritten, and `write_stream` was added to `encoder.__all__`.
+
+Verification after the fixes: 644 passed + 2 xfailed, three full runs in a row.
+
 ### Known limitations (carried to M4)
-- "Remove crop" and the Ctrl+arrow crop actions are enabled while the crop tool is off, but do nothing then (they need the tool on). The crop panel always works.
 - Space still toggles playback, so Space+drag does not pan in the app; middle-drag pans.
 - The estimate can be low for long GIFs whose middle is unrepresentative (0.67 in the cropped long case).
 

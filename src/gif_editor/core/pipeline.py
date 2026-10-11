@@ -14,7 +14,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
@@ -122,20 +122,21 @@ def estimate_size(
 ) -> int:
     """Rough output size in bytes, from encoding a few real output frames in memory.
 
-    Generates the first frame plus ``samples - 1`` evenly spaced frames with the real
-    pipeline (shared palette, cropping, differencing) and extrapolates linearly:
-    ``first + average_per_frame * (count - 1)``. Returns 0 for an empty plan.
+    Renders a CONTIGUOUS run of ``samples`` output frames from the middle of the timeline
+    with the real pipeline (shared palette, crop, resize, differencing), encodes them
+    TOGETHER as one stream, and extrapolates: ``first + per_frame * (count - 1)``, where
+    ``per_frame`` is the run's size minus its first frame, divided by the remaining frames.
+    Returns 0 for an empty plan.
 
-    The frames sampled are a CONTIGUOUS run from the middle of the timeline, and they are
-    encoded TOGETHER as one stream. Both details matter: GIF stores every frame as the
-    difference from the previous one, so measuring frames one at a time (or sampling frames
-    far apart) wildly overestimates. The run's total size minus the cost of its first frame
-    is the real per-frame cost of an additional frame.
+    Why a contiguous run encoded as one stream: GIF stores every frame as the difference
+    from the previous one, so frames measured one at a time (or sampled far apart) cost far
+    more than they really do. An earlier version did that and overestimated a GIF with a
+    static background 3.4x.
 
-    It is still an ESTIMATE (the UI shows it with a "~"): scenes that change a lot cost
-    more, and quantisation noise varies across the source. It encodes a handful of frames
-    (well under 100 ms for typical GIFs), so for a very large source call it off the GUI
-    thread.
+    Only the sampled frames are rendered (the timeline is sliced to the run), plus the up
+    to 16 frames the shared palette is built from, so the cost does not grow with the
+    GIF's length. It is still an ESTIMATE (the UI shows it with a "~"): scenes that change
+    a lot cost more than still ones. Call it off the GUI thread for very large frames.
     """
     n = timeline.frame_count
     if n == 0:
@@ -143,13 +144,10 @@ def estimate_size(
     count = max(1, min(int(samples), n))
     start = max(0, min(n - count, (n - count) // 2))
     palette = output_palette(source, state, timeline)
-    frames = iter_output_frames(source, state, timeline, palette)
-    window: list[tuple[Image.Image, int]] = []
-    for i, frame in enumerate(frames):
-        if i >= start:
-            window.append(frame)
-        if i >= start + count - 1:
-            break
+    # Render only the run itself: a timeline sliced to those frames. (Iterating the full
+    # timeline would render every frame before the run, i.e. half the GIF.)
+    run = replace(timeline, frames=timeline.frames[start : start + count])
+    window = list(iter_output_frames(source, state, run, palette))
     if not window:
         return 0
     # Measure the run as ONE stream, then the first frame of the run on its own: the

@@ -199,8 +199,10 @@ class MainWindow(QMainWindow):
             self.act_trim_reset, self.act_play, self.act_prev, self.act_next, self.act_prev10,
             self.act_next10, self.act_first, self.act_last, self.act_preview, self.act_fit,
             self.act_actual, self.act_zoom_in, self.act_zoom_out, self.act_crop_tool,
-            self.act_crop_reset, *self.act_crop_nudge, *self.act_crop_resize,
+            self.act_crop_reset,
         ]  # fmt: skip
+        # Nudge/resize act on the visible rectangle only; _update_crop_tool enables them.
+        self._crop_edit_actions = [*self.act_crop_nudge, *self.act_crop_resize]
 
     def _build_menus(self) -> None:
         mb = self.menuBar()
@@ -256,6 +258,8 @@ class MainWindow(QMainWindow):
         on = self.doc.is_open and not self._loading and not self._generating
         for act in self._doc_actions:
             act.setEnabled(on)
+        if hasattr(self, "crop_item"):  # not yet created during __init__
+            self._update_crop_tool()
         self.act_open.setEnabled(not self._loading and not self._generating)
 
     # ---------------------------------------------------------------- errors
@@ -321,9 +325,17 @@ class MainWindow(QMainWindow):
         In geometry preview the canvas shows the already-cropped output, whose pixels no
         longer correspond to source pixels, so a source-pixel rectangle would be wrong there.
         """
-        self.crop_item.set_tool_enabled(
-            self.act_crop_tool.isChecked() and not self.preview.geometry_enabled
+        shown = (
+            self.doc.is_open
+            and self.act_crop_tool.isChecked()
+            and not self.preview.geometry_enabled
+            and not self.is_busy
         )
+        self.crop_item.set_tool_enabled(shown)
+        # Ctrl+arrow nudge/resize only make sense on a rectangle you can see. Leaving them
+        # enabled while hidden would make the menu items look usable while doing nothing.
+        for act in self._crop_edit_actions:
+            act.setEnabled(shown)
 
     def _on_crop_tool_toggled(self, on: bool) -> None:
         self._update_crop_tool()

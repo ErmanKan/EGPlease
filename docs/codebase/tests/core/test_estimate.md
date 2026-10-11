@@ -14,6 +14,7 @@
 | `test_estimate_close_to_real[dither=True/False]` | test (2 cases) | Estimate vs the real `generate` size for 128 colours, with and without dithering: `0.5 × real ≤ estimate ≤ 2.0 × real`. |
 | `test_estimate_respects_edits` | test | Edits move the estimate the right way: a 30×30 crop resized to 20×20 at 8 colours is smaller than the unedited estimate; trimming to 0.5 s is smaller; deleting every frame gives exactly `0` (and `summarize` agrees: 0 frames). |
 | `test_estimate_is_fast_and_matches_generate` | test | A 60-frame 200×150 GIF: one estimate takes under 1.5 s, and lands within `0.4 × … 1.6 ×` of the real size. |
+| `test_estimate_renders_only_its_sample` | test | Counts `render_output_frame` calls on a 200-frame GIF: at most 16 palette samples + 5 run frames, so the cost does not grow with the GIF's length. |
 | `test_estimate_never_writes_files` | test | The directory listing is unchanged after an estimate: it encodes in memory only. |
 | `test_write_stream_writes_to_a_buffer` | test | `write_stream` into a `BytesIO` returns the frame count (3); the bytes, saved and read back, are 3 frames of 100 ms; zero frames raise `ValueError`. |
 

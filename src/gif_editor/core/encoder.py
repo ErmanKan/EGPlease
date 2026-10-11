@@ -30,7 +30,10 @@ from typing import BinaryIO
 import numpy as np
 from PIL import GifImagePlugin, Image
 
-__all__ = ["Cancelled", "estimate_size", "read_back", "write_gif"]
+# ``estimate_size`` here is the original M1 helper (a sample of pre-quantized frames). The app
+# uses ``pipeline.estimate_size`` instead, which renders real output frames; this one is kept
+# because it is small, tested, and useful for callers that already have quantized frames.
+__all__ = ["Cancelled", "estimate_size", "read_back", "write_gif", "write_stream"]
 
 MIN_DELAY_CS = 2
 MAX_DELAY_CS = 0xFFFF

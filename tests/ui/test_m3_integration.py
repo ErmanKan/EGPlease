@@ -159,6 +159,33 @@ def test_nudge_and_resize_shortcuts(qtbot, win):
     assert win.doc.undo_stack.count() == 3  # activate + 2 discrete steps
 
 
+def test_crop_edit_actions_follow_visibility(win):
+    """Nudge/resize are only enabled while the rectangle is shown."""
+    assert not win.crop_item.isVisible()
+    assert not any(a.isEnabled() for a in win.act_crop_nudge + win.act_crop_resize)
+    win.act_crop_tool.trigger()
+    assert all(a.isEnabled() for a in win.act_crop_nudge + win.act_crop_resize)
+    win.act_preview.trigger()  # rectangle hidden during output preview
+    assert not any(a.isEnabled() for a in win.act_crop_nudge)
+    win.act_preview.trigger()
+    assert win.act_crop_nudge[0].isEnabled()
+
+
+def test_remove_crop_works_with_tool_off(win):
+    win.settings.crop_panel.crop_group.setChecked(True)  # crop set from the panel
+    win.act_crop_tool.setChecked(False)  # user hides the rectangle
+    assert win.doc.state.crop is not None and not win.crop_item.isVisible()
+    win.act_crop_reset.trigger()
+    assert win.doc.state.crop is None
+
+
+def test_remove_crop_works_during_preview(win):
+    win.act_crop_tool.trigger()
+    win.act_preview.trigger()
+    win.act_crop_reset.trigger()
+    assert win.doc.state.crop is None
+
+
 def test_crop_tool_hidden_during_output_preview(win):
     win.act_crop_tool.trigger()
     assert win.crop_item.isVisible()

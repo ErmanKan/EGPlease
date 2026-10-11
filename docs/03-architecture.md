@@ -360,16 +360,14 @@ Shared widget rules (AGENTS.md):
 ### Known UI limitations (after M3)
 - **Space** is the window's play/pause shortcut, so the canvas's Space+drag pan never sees the key; **middle-drag** pans.
 - Window-level arrow and Home/End shortcuts are skipped when the focused widget accepts `ShortcutOverride` for them (the settings and crop panels' spin boxes; the filmstrip claims Delete/Backspace/Insert and handles them itself).
-- **Crop actions need the crop tool.** "Remove crop" and the Ctrl+arrow nudge/resize actions are enabled whenever a file is open, but do nothing while the tool is off or hidden by "Preview edits" (`CropItem._can_edit()` requires the tool). The crop panel always works.
+- **Crop actions follow the rectangle.** The Ctrl+arrow nudge/resize actions are enabled only while the crop rectangle is visible (tool on, not previewing). "Remove crop" works whenever a crop exists, whether or not the rectangle is shown. (Fixed after the M3 docs pass; see the dev log.)
 - In geometry preview the crop cannot be edited on the canvas (the rectangle is hidden, because the shown image is already cropped).
 
 ## Known drift between docs and code
 
 Things noticed while writing these docs. The code is the truth.
 - `docs/02-plan.md` is the original plan and is not rewritten; where the code deviates, see its [Implementation notes (deviations)](02-plan.md#implementation-notes-deviations).
-- `pipeline.estimate_size`'s docstring starts with "the first frame plus `samples − 1` evenly spaced frames … `first + average_per_frame × (count − 1)`", but the code (and the docstring's second paragraph) encode a **contiguous middle run** and extrapolate from the run's own first frame. It also says it "encodes a handful of frames"; it encodes `k` frames but renders and quantizes every output frame up to the end of the run (about half the GIF). See the [pipeline page](codebase/src/gif_editor/core/pipeline.md#invariants--gotchas).
-- `encoder.estimate_size` (the M1 helper) is still exported and tested but no longer used by the app; the summary uses `pipeline.estimate_size`. `encoder.write_stream` is public but missing from `encoder.__all__`.
-- "Remove crop" and the Ctrl+arrow crop actions are enabled while the crop tool is off but have no effect then (see §9 limitations).
+- `encoder.estimate_size` (the M1 helper) is still exported and tested but not used by the app; the summary uses `pipeline.estimate_size`. A comment next to `encoder.__all__` says so.
 - `Document.set_trim` defaults to `merge_key="trim"`. That is intended for spinbox scrubbing (the settings panel); drag and menu callers pass their own key (`"trim-drag-N"`) or `None`. Calling it without a key from a new discrete action would silently merge with the previous trim step.
 
 Fixed since M2 (kept here for reference): `app.py` now calls `run_selftest`; `Document.close()` now emits `currentIndexChanged`/`selectionChanged`; the decoder docstring now names the instance method `Image.Image.frombytes`; AGENTS.md lists `run_async(pool=)`, the full pipeline API and the per-widget interfaces; `scripts/fetch-devlibs.sh`'s header comment now says it checks only the pinned SHA-256 and how the pin was obtained (`76cd65c`); `encoder.estimate_size` is no longer "unused until M3" because M3 uses `pipeline.estimate_size` instead.

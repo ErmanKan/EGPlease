@@ -31,6 +31,9 @@
 | `test_drag_on_canvas_crops_in_one_undo_step` | A **real mouse drag** on the canvas viewport at zoom 8: three moves of 8 view px leave `doc.state.crop` untouched mid-drag; release after 24 view px moves the crop by 3 image px; the undo stack grows by exactly one; the panel's X spin shows 7; undo restores. |
 | `test_nudge_and_resize_shortcuts` | `act_crop_nudge[1]` (Ctrl+Right) and `act_crop_resize[1]` (Ctrl+Shift+Right) give x 5, w 33, as two separate undo steps. |
 | `test_crop_tool_hidden_during_output_preview` | The rectangle hides while **P** is on and comes back when it is off. |
+| `test_crop_edit_actions_follow_visibility` | Ctrl+arrow nudge/resize actions are enabled only while the rectangle is shown (off before the tool, on with it, off during "Preview edits"). |
+| `test_remove_crop_works_with_tool_off` | A crop set from the panel can be removed with "Remove crop" after hiding the rectangle. |
+| `test_remove_crop_works_during_preview` | "Remove crop" works while "Preview edits" hides the rectangle. |
 | `test_remove_crop_and_new_file_resets_tool` | "Remove crop" clears the crop; opening another file turns the tool off and hides the rectangle. |
 | `test_generate_applies_canvas_crop` | Generate after **C** writes a 32×24 GIF: the canvas crop reaches the output. |
 | `test_preview_edits_toggles_geometry` | P turns on both `player.preview_edits` and `preview.geometry_enabled`; the canvas shows the 16×12 cropped frame; P again turns geometry off and the 40×30 frame is back at once; an estimate is available. |
@@ -46,7 +49,7 @@
 ## Invariants & gotchas
 - Every `PreviewService` created here is `dispose()`d, so no debounce timer or worker callback outlives the test (see the [deleteLater trap](../../../06-testing.md#the-deletelater-teardown-trap)). `test_preview_edits_toggles_geometry` builds its own window and disposes its service itself.
 - `CropRect(4, 3, 32, 24)` depends on the fixture size: 10% of 40×30 is 4×3 on each side.
-- The nudge/resize test turns the tool on first. With the tool off, the Crop menu's nudge, resize and Remove-crop actions do nothing (see [main window gotchas](../../src/gif_editor/ui/main_window.md#invariants--gotchas)); no test covers that case.
+- The nudge/resize test turns the tool on first. `test_crop_edit_actions_follow_visibility` checks that the nudge/resize actions are disabled whenever the rectangle is hidden, and the two `test_remove_crop_works_*` tests check that "Remove crop" works with the tool off and during "Preview edits" (both were bugs found by the M3 docs pass).
 
 ## Tests
 - This file is the test. During M3 verification it was run 3× in a row with no flakes.

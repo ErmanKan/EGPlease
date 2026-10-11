@@ -64,6 +64,26 @@ def test_estimate_is_fast_and_matches_generate(tmp_path):
     assert 0.4 * real <= est <= 1.6 * real
 
 
+def test_estimate_renders_only_its_sample(tmp_path, monkeypatch):
+    """Cost must not grow with GIF length: render the sample run + palette samples only."""
+    from gif_editor.core import pipeline
+
+    src = _noisy_gif(tmp_path / "in.gif", n=200, size=(40, 30))
+    rendered = []
+    real = pipeline.render_output_frame
+
+    def counting(source, i, state):
+        rendered.append(i)
+        return real(source, i, state)
+
+    monkeypatch.setattr(pipeline, "render_output_frame", counting)
+    with GifSource.open(src) as s:
+        est = estimate_size(s, EditState(), plan(s.meta, EditState()))
+    assert est > 0
+    # 16 palette samples + 5 run frames, not ~100 (half the GIF).
+    assert len(rendered) <= 16 + 5, len(rendered)
+
+
 def test_estimate_never_writes_files(tmp_path):
     src = _noisy_gif(tmp_path / "in.gif")
     before = sorted(p.name for p in tmp_path.iterdir())

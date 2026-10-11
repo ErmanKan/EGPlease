@@ -331,7 +331,9 @@ class CropItem(QGraphicsObject):
 
     def reset(self) -> None:
         """Remove the crop (``crop=None``) as one undo step."""
-        if not self._can_edit() or self._doc.state.crop is None:
+        # Unlike the drag/nudge edits this does not need the tool to be on: removing a crop
+        # that was set from the crop panel must work while the rectangle is hidden.
+        if not self._doc.is_open or self._doc.state.crop is None:
             return
         self._try_apply(None, "Reset crop", None)
 
