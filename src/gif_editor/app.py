@@ -26,7 +26,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_selftest()
     except SelfTestError as exc:
-        QMessageBox.critical(None, APP_NAME, f"Startup self-test failed:\n\n{exc}")
+        # Only a broken build can get here (the Pillow version is pinned and bundled), so
+        # the message says so plainly and keeps the technical text for a bug report.
+        box = QMessageBox(
+            QMessageBox.Icon.Critical,
+            APP_NAME,
+            f"{APP_NAME} can't start because one of its components is not working.",
+        )
+        box.setInformativeText(
+            "This is a problem with this copy of the program, not with your files. "
+            "Download it again; if that doesn't help, report the details below."
+        )
+        box.setDetailedText(f"Startup self-test failed:\n{exc}")
+        box.exec()
         return 1
 
     win = MainWindow()

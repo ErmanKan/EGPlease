@@ -142,6 +142,17 @@ class SettingsPanel(QWidget):
         return QSize(self.PANEL_WIDTH, super().sizeHint().height())
 
     # ------------------------------------------------------------------ build
+    @staticmethod
+    def _explain(widget: QWidget, text: str) -> None:
+        """Tooltip + accessible description: the range and WHY it is limited.
+
+        Spin boxes silently clamp what you type to their range, which looks like the app
+        ignoring you. Saying the limit and its reason (where the mouse and screen readers
+        both find it) turns that into an expected rule.
+        """
+        widget.setToolTip(text)
+        widget.setAccessibleDescription(text)
+
     def _build_timing(self) -> QGroupBox:
         self.timing_group = QGroupBox("Timing")
         form = QFormLayout(self.timing_group)
@@ -152,6 +163,11 @@ class SettingsPanel(QWidget):
         self.start_spin.setSingleStep(0.01)
         self.start_spin.setSuffix(" s")
         self.start_spin.setKeyboardTracking(False)
+        self._explain(
+            self.start_spin,
+            "Where the output starts, in seconds from the beginning of the GIF.\n"
+            "Also set by dragging the timeline's left handle or pressing I.",
+        )
         form.addRow("Start time", self.start_spin)
 
         self.duration_spin = QDoubleSpinBox()
@@ -165,6 +181,12 @@ class SettingsPanel(QWidget):
         row = QHBoxLayout()
         row.addWidget(self.duration_spin, 1)
         row.addWidget(self.to_end_check)
+        self._explain(
+            self.duration_spin,
+            "How long the output runs from the start time, measured in the original GIF's "
+            "time (before speed). Can't go past the end of the GIF.",
+        )
+        self._explain(self.to_end_check, "Run from the start time to the end of the GIF.")
         form.addRow("Duration", row)
 
         self.speed_spin = QDoubleSpinBox()
@@ -180,6 +202,13 @@ class SettingsPanel(QWidget):
         self.speed_slider.setRange(round(MIN_SPEED * 100), round(MAX_SPEED * 100))
         self.speed_slider.setSingleStep(5)
         self.speed_slider.setPageStep(25)
+        speed_text = (
+            f"Playback speed, {MIN_SPEED:g}\u00d7 to {MAX_SPEED:g}\u00d7. Faster speeds "
+            "shorten every frame's delay. GIF viewers slow down frames shorter than 20 ms, "
+            "so such frames are merged with their neighbours (the summary shows how many)."
+        )
+        self._explain(self.speed_spin, speed_text)
+        self._explain(self.speed_slider, speed_text)
         speed_box = QVBoxLayout()
         speed_box.setSpacing(2)
         speed_box.addWidget(self.speed_spin)
@@ -195,6 +224,17 @@ class SettingsPanel(QWidget):
         self.fps_spin.setSingleStep(1.0)
         self.fps_spin.setValue(25.0)
         self.fps_spin.setKeyboardTracking(False)
+        self._explain(
+            self.fps_check,
+            "Drop frames so the output plays at most this many frames per second "
+            "(smaller file, choppier motion).",
+        )
+        self._explain(
+            self.fps_spin,
+            f"1 to {MAX_FPS:g} frames per second. GIF stores delays in hundredths of a "
+            "second and viewers treat anything faster than 50 FPS (20 ms) as slow, so 50 "
+            "is the highest rate that plays reliably.",
+        )
         row = QHBoxLayout()
         row.addWidget(self.fps_check)
         row.addWidget(self.fps_spin, 1)
@@ -212,12 +252,19 @@ class SettingsPanel(QWidget):
             spin.setRange(1, MAX_SIDE)
             spin.setSuffix(" px")
             spin.setKeyboardTracking(False)
+        for spin, side in ((self.width_spin, "width"), (self.height_spin, "height")):
+            self._explain(
+                spin,
+                f"Output {side}, 1 to {MAX_SIDE:,} pixels (the largest image the editor "
+                "handles safely). Applied after the crop.",
+            )
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
 
         self.lock_check = QCheckBox("Lock aspect")
         self.lock_check.setAccessibleName("Lock aspect ratio")
         self.lock_check.setChecked(True)
+        self._explain(self.lock_check, "Changing width or height changes the other to match.")
         form.addRow("", self.lock_check)
 
         self.scale_spin = QSpinBox()
@@ -225,9 +272,14 @@ class SettingsPanel(QWidget):
         self.scale_spin.setRange(1, 400)
         self.scale_spin.setSuffix(" %")
         self.scale_spin.setKeyboardTracking(False)
+        self._explain(
+            self.scale_spin,
+            "Output size as a percentage of the cropped frame, 1 to 400 %. Enlarging adds "
+            "no detail and makes the file much bigger.",
+        )
         self.reset_size_button = QPushButton("Reset")
         self.reset_size_button.setAccessibleName("Reset output size")
-        self.reset_size_button.setToolTip("Use the crop size (or the original size)")
+        self._explain(self.reset_size_button, "Use the crop size (or the original size)")
         row = QHBoxLayout()
         row.addWidget(self.scale_spin, 1)
         row.addWidget(self.reset_size_button)
@@ -241,16 +293,30 @@ class SettingsPanel(QWidget):
         self.preset_combo.setAccessibleName("Quality preset")
         for label, key in PRESETS:
             self.preset_combo.addItem(label, key)
+        self._explain(
+            self.preset_combo,
+            "Sets colours and dithering together. Fewer colours make a smaller file.",
+        )
         form.addRow("Preset", self.preset_combo)
 
         self.colors_spin = QSpinBox()
         self.colors_spin.setAccessibleName("Colours")
         self.colors_spin.setRange(2, 256)
         self.colors_spin.setKeyboardTracking(False)
+        self._explain(
+            self.colors_spin,
+            "Colours in the shared palette, 2 to 256. A GIF can hold at most 256 colours; "
+            "fewer colours make a smaller file but show banding.",
+        )
         form.addRow("Colours", self.colors_spin)
 
         self.dither_check = QCheckBox("Dither")
         self.dither_check.setAccessibleName("Dither")
+        self._explain(
+            self.dither_check,
+            "Mixes palette colours in fine patterns to hide banding in gradients. "
+            "Looks smoother but makes the file larger.",
+        )
         form.addRow("", self.dither_check)
         return self.quality_group
 

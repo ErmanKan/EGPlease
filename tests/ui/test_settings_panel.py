@@ -189,3 +189,24 @@ def test_empty_document_everything_disabled(qtbot):
     assert "No file open" in p.summary_label.text()
     p.speed_spin.setValue(2.0)  # even if forced, nothing is pushed
     assert d.undo_stack.count() == 0
+
+
+def test_every_input_explains_its_limits(qtbot, doc):
+    """Spin boxes clamp silently; each one (and each option) must say its range and why."""
+    from PySide6.QtWidgets import QAbstractButton, QAbstractSpinBox, QComboBox, QSlider
+
+    panel = SettingsPanel(doc)
+    qtbot.addWidget(panel)
+    crop = panel.crop_panel
+    unexplained = [
+        w.accessibleName()
+        for kind in (QAbstractSpinBox, QComboBox, QSlider, QAbstractButton)
+        for w in panel.findChildren(kind)
+        if not (crop is w or crop.isAncestorOf(w))  # the crop panel has its own texts
+        and w is not panel.generate_button
+        and not (w.toolTip() and w.accessibleDescription() == w.toolTip())
+    ]
+    assert unexplained == []
+    assert "50" in panel.fps_spin.toolTip() and "20 ms" in panel.fps_spin.toolTip()
+    assert "256" in panel.colors_spin.toolTip()
+    assert "8,192" in panel.width_spin.toolTip()
