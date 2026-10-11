@@ -1,10 +1,10 @@
 # `src/gif_editor/ui/settings_panel.py`
 
-> The left-hand panel: timing, output size, crop and quality controls, a live summary card (with the estimated file size) and the big Generate button, all mirroring and editing `Document.state`.
+> The left-hand panel: timing, output size, crop and quality controls, a live summary card (with the estimated file size) and the big Generate button, all mirroring and editing `Document.state`. Every input explains its range and why in a tooltip (and the same text as its accessible description).
 
 ## Where it sits
 - **Layer:** ui (Qt)
-- **Used by:** `ui/main_window.py` (creates it with `preview=self.preview`, places it on the left inside a `QScrollArea`, connects `generateRequested` and the Ctrl+G shortcut).
+- **Used by:** `ui/main_window.py` (creates it with `preview=self.preview`, places it on the left inside a `QScrollArea`, **moves `generate_button` out of the panel's layout into a pinned footer under the scroll area** (M4), connects `generateRequested` and the Ctrl+G shortcut).
 - **Uses:** `ui/document.py` (`Document`: state, `apply`, `set_trim`, `summary`, signals), `core/models.py` (`EditState`, `OutputSize`, `Quality`, `MIN_SPEED`/`MAX_SPEED`/`MAX_FPS`). Indirectly `core/pipeline.summarize` via `Document.summary()`. `ui/crop_panel.py` (`CropPanel`, embedded). Optionally a `PreviewService` (`ui/inspector/preview.py`), duck-typed: only `estimated_bytes`, `estimate_pending`, `estimateChanged` and `estimateReady` are used, and the module is not imported.
 
 ## Public API
@@ -27,7 +27,7 @@ Signals (Qt files): `generateRequested()`: fires when the Generate button is cli
 ## How it works
 
 ### Layout
-A `QVBoxLayout` stacks Timing, Output size, the **Crop** group (`CropPanel`, M3), Quality, Summary, a stretch, and the Generate button. Each group uses a `QFormLayout` (label column + field column), which is the Qt idiom for settings forms and keeps labels aligned automatically under any font/DPI. Nothing is sized in physical pixels, so HiDPI scaling is handled by Qt.
+A `QVBoxLayout` stacks Timing, Output size, the **Crop** group (`CropPanel`, M3), Quality, Summary, a stretch, and the Generate button. (Inside the main window the Generate button is removed from this layout and pinned below the scroll area, so it never scrolls out of view; the panel still owns it and emits `generateRequested` from it. See [main_window](main_window.md#layout).) Each group uses a `QFormLayout` (label column + field column), which is the Qt idiom for settings forms and keeps labels aligned automatically under any font/DPI. Nothing is sized in physical pixels, so HiDPI scaling is handled by Qt.
 
 | Group | Controls | Maps to |
 |---|---|---|
@@ -36,6 +36,29 @@ A `QVBoxLayout` stacks Timing, Output size, the **Crop** group (`CropPanel`, M3)
 | Crop (`crop_panel`) | checkable group: Aspect, X/Y/W/H, Full image / Center / Reset, status line | `crop` (None = no crop). Owned by `CropPanel`; see [its page](crop_panel.md) |
 | Quality | Preset (High/Medium/Low/Custom), Colours (2–256), Dither | `quality` |
 | Summary | rich-text `QLabel` | read-only, from `doc.meta` and `doc.summary()` |
+
+### Tooltips: every input says its range and why (M4)
+`_explain(widget, text)` (a static method) sets the **same text** as the widget's tooltip and its `accessibleDescription`. *Why:* spin boxes silently clamp what you type to their range, which looks like the app ignoring you. Saying the limit and its reason, where the mouse (tooltip) and screen readers (accessible description) both find it, turns that into an expected rule. The texts, verified against the code:
+
+| Control | Text (abridged) | The *why* behind the limit |
+|---|---|---|
+| Start time | where the output starts, in seconds; also set by the left timeline handle or I | — |
+| Duration | length from the start, in the original GIF's time (before speed); can't go past the end | trim is in source time (Gate 1 decision) |
+| to end | run from the start time to the end | — |
+| Speed spin + slider | "Playback speed, 0.25× to 4×. Faster speeds shorten every frame's delay. GIF viewers slow down frames shorter than 20 ms, so such frames are merged with their neighbours (the summary shows how many)." | output delays must be ≥ 20 ms (`timeline._enforce_min_delay`) |
+| Limit FPS | drop frames so the output plays at most this many FPS (smaller file, choppier motion) | speed/FPS only drop frames |
+| FPS spin | "1 to 50 frames per second. GIF stores delays in hundredths of a second and viewers treat anything faster than 50 FPS (20 ms) as slow, so 50 is the highest rate that plays reliably." | `models.MAX_FPS` |
+| Width / Height | "Output width/height, 1 to 8,192 pixels (the largest image the editor handles safely). Applied after the crop." | `MAX_SIDE = 8192` in this module, the same value as the decoder's `Limits.max_canvas_side` |
+| Lock aspect | changing one side changes the other to match | — |
+| Scale % | % of the cropped frame, 1–400 %; enlarging adds no detail and makes the file much bigger | — |
+| Reset (size) | use the crop size (or the original size) | — |
+| Preset | sets colours and dithering together; fewer colours = smaller file | — |
+| Colours | "Colours in the shared palette, 2 to 256. A GIF can hold at most 256 colours; fewer colours make a smaller file but show banding." | GIF palette limit |
+| Dither | mixes palette colours in fine patterns to hide banding; smoother but larger | — |
+
+The numbers for speed, FPS and size come from the constants (`MIN_SPEED`, `MAX_SPEED`, `MAX_FPS`, `MAX_SIDE`) via f-strings (the 2–256 colours and 1–400 % are literal text), so the text cannot drift from the range. The crop panel has its own tooltips; the Generate button is not covered.
+
+**A wrong claim caught in review.** An earlier draft of the speed tooltip claimed that very high speeds make the GIF play *slower* (true for a naive GIF writer, because viewers slow down delays under 20 ms). That is not what this editor does: it never writes a delay under 20 ms, it **folds** the too-short frames into their neighbours instead (`timeline._enforce_min_delay`), and the summary reports how many frames were dropped. The text was corrected before commit; the test now pins the numbers but not the wording, so tooltip claims must be checked against `core/timeline.py` by hand.
 
 ### The two directions of data flow
 ```mermaid
@@ -105,13 +128,16 @@ Its rejected edits are **forwarded** into this panel's summary card: `crop_panel
 - The panel does not implement "trim from playhead" shortcuts; the main window owns those.
 - The panel only **reads** the preview service; it never calls `refresh_estimate`. The service follows `Document` itself.
 - The crop controls are not in this panel's `_blocked()` list; `CropPanel` blocks its own controls in its refresh.
+- When adding a control, also call `_explain(widget, text)` with its range and the reason for it; `test_every_input_explains_its_limits` fails otherwise.
 - Colours are inline hex (`#c77700`, `#c0392b`) chosen to read on both the light and dark Fusion palettes.
 
 ## Tests
-- `tests/ui/test_settings_panel.py`: initial values; speed spin merging into one undo step; slider ↔ spin sync; undo restoring controls without pushing commands; "to end" ↔ `None`; start/duration clamping; FPS checkbox ↔ `None`/value; aspect lock (canvas and crop base), unlocked editing; scale and Reset; presets and switching to Custom; summary text and update after `delete_frames`; empty output disabling Generate; `ValueError` revert + message; `generateRequested` on click; disabled state after `close()` and for a Document with no source.
+- `tests/ui/test_settings_panel.py`: initial values; speed spin merging into one undo step; slider ↔ spin sync; undo restoring controls without pushing commands; "to end" ↔ `None`; start/duration clamping; FPS checkbox ↔ `None`/value; aspect lock (canvas and crop base), unlocked editing; scale and Reset; presets and switching to Custom; summary text and update after `delete_frames`; empty output disabling Generate; `ValueError` revert + message; `generateRequested` on click; disabled state after `close()` and for a Document with no source; (M4) `test_every_input_explains_its_limits`: every spin box, combo box, slider and button in the panel (except the crop panel's own and Generate) has a tooltip equal to its accessible description, and the FPS, colours and width tooltips name 50 / 20 ms, 256 and 8,192.
 - `tests/ui/test_m3_integration.py` ([page](../../../tests/ui/test_m3_integration.md)): `format_bytes`; the Size line with and without a service; the crop panel is part of the panel and the summary shows the crop size; a crop error appears in the summary card.
-- Gaps: visual layout/width inside a real `QScrollArea` is not asserted beyond `sizeHint()` (checked by hand at 1300×820 in M3); warning colour rendering is not checked; the "estimating…" line is not asserted.
+- `tests/ui/test_main_window.py::test_window_fits_small_screen_and_generate_stays_visible`: in the window, Generate is outside the scroll area and fully visible on a 1280×680 screen.
+- Gaps: visual layout/width inside a real `QScrollArea` is not asserted beyond `sizeHint()` (checked by hand at 1300×820 in M3); the wording of the tooltips (only their presence and key numbers); warning colour rendering is not checked; the "estimating…" line is not asserted.
 
 ## History
 - Milestone 2: created (settings panel worker). Size equal to the base is stored as `None` so crop changes keep driving the output size.
 - `3adb5bd` (M3): `preview=` keyword, `crop_panel` embedded below Output size, crop errors forwarded to the summary card, `format_bytes` and the Size line. See [dev log, Milestone 3](../../../../04-development-log.md#milestone-3-crop-and-live-preview).
+- `39e533b` (M4): `_explain` tooltips + accessible descriptions on every input. `9361dd6` (M4): the main window pins `generate_button` outside the scroll area. See [dev log, Milestone 4](../../../../04-development-log.md#milestone-4-hardening).

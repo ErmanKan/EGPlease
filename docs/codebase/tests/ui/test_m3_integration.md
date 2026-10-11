@@ -38,7 +38,7 @@
 | `test_generate_applies_canvas_crop` | Generate after **C** writes a 32×24 GIF: the canvas crop reaches the output. |
 | `test_preview_edits_toggles_geometry` | P turns on both `player.preview_edits` and `preview.geometry_enabled`; the canvas shows the 16×12 cropped frame; P again turns geometry off and the 40×30 frame is back at once; an estimate is available. |
 
-15 collected cases.
+18 collected cases.
 
 ## How it works
 - **Pixels prove what is shown.** The fixture GIF has a solid colour per frame, so `_px` can tell from one pixel which source frame is on screen and from the pixmap size whether it is the source or the cropped/resized output.

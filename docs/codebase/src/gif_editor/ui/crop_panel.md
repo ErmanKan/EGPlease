@@ -40,7 +40,7 @@ The widget is one checkable `QGroupBox` titled **"Crop"**, holding a `QFormLayou
 | (spanning) | `full_button` \| `center_button` \| `reset_button` | one `QHBoxLayout` added as a form row |
 | (spanning) | `status_label` | last form row (`form.addRow(widget)`), plain text |
 
-All four spinboxes set `setKeyboardTracking(False)` (typing "20" applies on Enter/focus-out, not as "2" then "20"). Every control gets a `setAccessibleName` ("Crop aspect", "Crop x", "Crop y", "Crop width", "Crop height", "Crop: full image", "Crop: centre", "Crop: reset"). The widget sets no fixed width — it inherits the settings panel / scroll-area width (`setSizePolicy(Preferred, Preferred)`); it does **not** override `sizeHint`.
+All four spinboxes set `setKeyboardTracking(False)` (typing "20" applies on Enter/focus-out, not as "2" then "20"). Every control gets a `setAccessibleName` ("Crop aspect", "Crop x", "Crop y", "Crop width", "Crop height", "Crop: full image", "Crop: centre", "Crop: reset"). The panel itself is named **"Crop settings"** (M4, `d3f0297`): an accessibility audit found it, the inspector and the settings scroll area to be the only unnamed containers, so a screen reader had nothing to announce when entering the group. The widget sets no fixed width — it inherits the settings panel / scroll-area width (`setSizePolicy(Preferred, Preferred)`); it does **not** override `sizeHint`.
 
 ### The Aspect combo
 `ASPECTS` is the exact and complete entry list, in this order:
@@ -131,3 +131,4 @@ Every `doc.apply` goes through a `_try` wrapper (the settings-panel pattern). On
   1. **Merge keys.** Spinboxes use `"crop"`; the canvas `CropItem` uses a per-drag key `"crop-drag-N"` (like the timebar's `"trim-drag-N"`), so a spinbox nudge right after a drag stays a separate undo step. This resolves the warning in *Invariants & gotchas*.
   2. **Ticking with a full-frame default** creates an 80% centred crop instead of doing nothing (rule 12).
 - Documented deviation from the spec: inputs are greyed out while the group is unticked (Qt behaviour, see *Enabled state*).
+- `d3f0297` (M4): `setAccessibleName("Crop settings")` on the panel ([dev log, Milestone 4](../../../../04-development-log.md#milestone-4-hardening)). Its tooltips are its own; the settings panel's `_explain` texts (M4) do not cover the crop inputs.

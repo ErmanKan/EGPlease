@@ -164,11 +164,31 @@ PreviewService(doc, parent=None, *, cache_size=32, debounce_ms=250)   # ui/inspe
 
 MainWindow(doc=None, parent=None)             # ui/main_window.py: owns Document, Player, PreviewService, CropItem
   .open_file(path) .generate_to(path) .cancel_generate() .save_frame_to(path, with_edits=False)
-  .trim_in_here() .trim_out_here() .reset_trim() .show_error(msg) .is_busy .last_error .last_result
+  .trim_in_here() .trim_out_here() .reset_trim() .is_busy .last_error .last_result .last_dialog
   .preview .crop_item .settings .inspector
   .act_* (QActions; shortcuts are window-wide): act_preview (P: timing AND geometry), act_crop_tool (C),
       act_crop_reset, act_crop_nudge[4] (Ctrl+arrows), act_crop_resize[4] (Ctrl+Shift+arrows)
 ```
+# Milestone 4
+messages.py                                   # ui/messages.py: core exceptions -> plain-language dialogs (no Qt)
+  Explanation(title, headline, body, details)  # .text == headline + "\n" + body (for last_error/status bar)
+  explain_load_error(exc, path) -> Explanation       # dispatches on GifLoadError.kind; technical text in .details
+  explain_load_warnings(warnings, path, frames) -> Explanation
+  explain_generate_error(exc, path, title="Generate failed") -> Explanation   # errno/winerror/MemoryError/fallback
+MainWindow.show_explanation(expl, icon=QMessageBox.Icon.Warning) -> QMessageBox
+                                              # non-blocking; keeps last_error (text) and last_dialog; details behind "Show Details..."
+MainWindow._fit_to_screen()                   # PREFERRED_SIZE (1300x820) capped to 90 % of the screen, centred
+FrameCanvas.spaceTapped                       # signal: Space pressed and released with no drag (tap = play/pause)
+FrameCanvas.set_preview(preview)              # also enables async source frames: source frames costing more
+                                              # than SYNC_DECODE_PIXELS (4M frames x pixels) render in the background
+GifSource.frames_to_decode(i) -> int          # compositing cost of frame(i); GifSource.BUSY if another thread
+                                              # holds the decoder (never blocks) -> caller must go async
+GifLoadError.kind / .info                     # NOT_FOUND, IS_DIRECTORY, UNREADABLE, EMPTY, NOT_GIF, TOO_LARGE,
+                                              # TOO_MANY_FRAMES, MALFORMED; .info carries width/height/max_side/max_frames
+workers.run_async(...)                        # unchanged API; jobs now run as plain callables (never subclass
+                                              # QRunnable in Python in this project: cross-thread wrapper/override
+                                              # handling caused one crash and one GC deadlock in ~20 suite runs)
+
 Merge-key rule: `SetStateCommand` merges ANY consecutive commands with the same key, so keys are per gesture. Spinbox scrubbing uses a fixed key per setting (`"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"`, `"crop"`); each drag uses a fresh key per press (`"trim-drag-N"`, `"crop-drag-N"`) so a drag never merges with the next drag or with a following spinbox edit; discrete actions (buttons, menu items, nudges, toggles) pass `None`. Never reuse a spinbox key for a drag.
 
 Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels).
@@ -181,6 +201,8 @@ Widget rules: construct with `(doc: Document, parent=None)`; connect to doc sign
 ## Tests
 - pytest; generate fixture GIFs in code (`tests/gifgen.py`, `tests/corpus.py`). Never commit binary fixtures.
 - Each core module has `tests/core/test_<module>.py`. UI tests use pytest-qt with `QT_QPA_PLATFORM=offscreen`.
+- Temp files stay inside the project: `scripts/test.sh` passes `--basetemp=out/pytest-tmp/run-<pid>` (one dir per run; dirs of exited runs are deleted) and `--capture=sys` (the default fd capture uses deleted-while-open temp files, which the F: drive mount rejects, so `TMPDIR` must not point into the project). Never write to `/tmp`; use `out/`.
+- `tests/ui/conftest.py` has an autouse `_drain_workers` fixture (depends on `qtbot`, so it tears down before widgets close): it waits for `QThreadPool` and processes events, so no background task outlives its test. Do not remove it; never leave a worker running across tests.
 
 ## Git
 - Conventional commits (`feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`).

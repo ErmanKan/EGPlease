@@ -7,7 +7,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 |---|---|---|
 | `src/gif_editor/__init__.py` | Package docstring and `__version__ = "0.1.0"` | [page](src/gif_editor/__init__.md) |
 | `src/gif_editor/__main__.py` | `python -m gif_editor` → `app.main()` | [page](src/gif_editor/__main__.md) |
-| `src/gif_editor/app.py` | `main()`: `QApplication` (Fusion), Pillow self-test, `MainWindow`, optional GIF path from the command line | [page](src/gif_editor/app.md) |
+| `src/gif_editor/app.py` | `main()`: `QApplication` (Fusion), Pillow self-test (plain failure dialog), `MainWindow`, optional GIF path from the command line, waits for the thread pool before exit | [page](src/gif_editor/app.md) |
 | `src/gif_editor/resources/icons/.gitkeep` | Empty placeholder for app icons (none used yet: buttons use Qt standard icons) | — (empty file) |
 
 ### Core engine: `src/gif_editor/core/` (no Qt)
@@ -15,7 +15,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 |---|---|---|
 | `core/__init__.py` | Package marker ("Pure-Python GIF engine (no Qt)") | [page](src/gif_editor/core/__init__.md) |
 | `core/models.py` | Immutable `EditState` + `CropRect`, `OutputSize`, `Quality`; field and source validation | [page](src/gif_editor/core/models.md) |
-| `core/decoder.py` | `GifSource`: own block parser, numpy compositor with browser disposal, LRU + keyframe checkpoints, DoS limits | [page](src/gif_editor/core/decoder.md) |
+| `core/decoder.py` | `GifSource`: own block parser, numpy compositor with browser disposal, LRU + keyframe checkpoints, DoS limits; `GifLoadError.kind`/`.info`; non-blocking `frames_to_decode` (`BUSY`) | [page](src/gif_editor/core/decoder.md) |
 | `core/timeline.py` | `plan_output`: trim → delete → speed → FPS grid → min 20 ms → cs rounding with carry → 65535 cs split | [page](src/gif_editor/core/timeline.md) |
 | `core/render.py` | Crop, premultiplied LANCZOS resize, shared palette (`build_palette`), quantize with anti-shimmer | [page](src/gif_editor/core/render.md) |
 | `core/encoder.py` | `write_gif`: own GIF container, lossless difference frames, atomic temp+rename, progress/cancel/verify; `write_stream` (same encoder into any open stream, e.g. `BytesIO`); `read_back`; legacy `estimate_size` (unused by the app) | [page](src/gif_editor/core/encoder.md) |
@@ -28,13 +28,14 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `ui/__init__.py` | Package marker | [page](src/gif_editor/ui/__init__.md) |
 | `ui/document.py` | `Document`: the hub holding source, `EditState`, undo stack, current frame, selection; all widgets talk to it | [page](src/gif_editor/ui/document.md) |
 | `ui/commands.py` | `SetStateCommand`: generic old → new `EditState` undo step with gesture merging | [page](src/gif_editor/ui/commands.md) |
-| `ui/workers.py` | `run_async`: run work on `QThreadPool`, callbacks on the GUI thread | [page](src/gif_editor/ui/workers.md) |
+| `ui/workers.py` | `run_async`: run a plain callable on `QThreadPool`, callbacks on the GUI thread; relay freed only after the worker left `emit()` |
+| `ui/messages.py` | `Explanation` + `explain_load_error` / `explain_load_warnings` / `explain_generate_error`: exceptions → plain-language dialog texts (no Qt) | [page](src/gif_editor/ui/messages.md) |
 | `ui/qt_image.py` | `pil_to_qimage` (thread-safe copy) and `checkerboard_brush` | [page](src/gif_editor/ui/qt_image.md) |
-| `ui/settings_panel.py` | `SettingsPanel`: left panel with timing, size, crop (embedded `CropPanel`), quality controls, the live summary card with the size estimate, and the Generate button; `format_bytes` | [page](src/gif_editor/ui/settings_panel.md) |
+| `ui/settings_panel.py` | `SettingsPanel`: left panel with timing, size, crop (embedded `CropPanel`), quality controls, the live summary card with the size estimate, and the Generate button (pinned outside the scroll area by the window); tooltips that explain each range (`_explain`); `format_bytes` | [page](src/gif_editor/ui/settings_panel.md) |
 | `ui/crop_panel.py` | `CropPanel`: the checkable Crop group (aspect preset, X/Y/W/H, Full image / Center / Reset, status); spinboxes merge as `"crop"` | [page](src/gif_editor/ui/crop_panel.md) |
-| `ui/main_window.py` | `MainWindow`: owns `Document`, `Player`, `PreviewService`, `CropItem`; layout, menus and shortcuts (Crop menu, crop tool C), async open + drag-drop, Generate with progress/cancel, Save frame as PNG, trim at playhead | [page](src/gif_editor/ui/main_window.md) |
+| `ui/main_window.py` | `MainWindow`: owns `Document`, `Player`, `PreviewService`, `CropItem`; layout, menus and shortcuts (Crop menu, crop tool C), async open + drag-drop, Generate with progress/cancel, Save frame as PNG, trim at playhead; fits the screen, pinned Generate, `show_explanation` error dialogs, close during Generate | [page](src/gif_editor/ui/main_window.md) |
 | `ui/inspector/__init__.py` | Package marker for the right-hand inspector | [page](src/gif_editor/ui/inspector/__init__.md) |
-| `ui/inspector/canvas.py` | `FrameCanvas`: zoomable, pannable view of the current frame on a checkerboard, with a deleted-frame overlay; geometry-preview mode shows the cropped/resized output frame | [page](src/gif_editor/ui/inspector/canvas.md) |
+| `ui/inspector/canvas.py` | `FrameCanvas`: zoomable, pannable view of the current frame on a checkerboard, with a deleted-frame overlay; geometry-preview mode shows the cropped/resized output frame; expensive source frames render off-thread; claims Space for Space+drag (`spaceTapped`) | [page](src/gif_editor/ui/inspector/canvas.md) |
 | `ui/inspector/crop_item.py` | `CropItem`: draggable/resizable crop rectangle in the canvas scene (image px), dimmed outside, one undo step per drag (`crop-drag-N`), nudge/resize/activate/reset | [page](src/gif_editor/ui/inspector/crop_item.md) |
 | `ui/inspector/preview.py` | `PreviewService`: non-visual; renders crop+resize preview frames off-thread (LRU, stale results dropped) and keeps the debounced output size estimate | [page](src/gif_editor/ui/inspector/preview.md) |
 | `ui/inspector/timebar.py` | `TimeBar`: custom-painted source timeline with playhead, frame ticks and snapping green/red trim handles | [page](src/gif_editor/ui/inspector/timebar.md) |
@@ -52,23 +53,24 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/corpus.py` | Raw GIF89a writer, literal-only LZW, browser reference compositor, 13 edge-case entries | [page](tests/corpus.md) |
 | `tests/core/__init__.py` | Empty package marker | [page](tests/core/__init__.md) |
 | `tests/core/test_models.py` | `EditState` defaults, `with_`, validation, presets (14) | [page](tests/core/test_models.md) |
-| `tests/core/test_decoder.py` | `GifSource` metadata, pixels, cache, limits, threads, file release (25) | [page](tests/core/test_decoder.md) |
+| `tests/core/test_decoder.py` | `GifSource` metadata, pixels, cache, limits, threads, file release, `frames_to_decode` (27) | [page](tests/core/test_decoder.md) |
 | `tests/core/test_decoder_corpus.py` | `GifSource` vs reference compositor; edge cases; memory-DoS guards (56) | [page](tests/core/test_decoder_corpus.md) |
 | `tests/core/test_corpus.py` | The corpus vs raw Pillow; 2 strict xfails documenting Pillow's disposal-2 bug (51) | [page](tests/core/test_corpus.md) |
 | `tests/core/test_timeline.py` | `plan_output` tables and 600 randomized property checks (112) | [page](tests/core/test_timeline.md) |
 | `tests/core/test_render.py` | Crop/resize, quantize, transparency, shared palette, anti-shimmer (44) | [page](tests/core/test_render.md) |
 | `tests/core/test_encoder.py` | Writer structure, lossless diffs, transparency/disposal, atomicity, cancel, verify (62) | [page](tests/core/test_encoder.md) |
 | `tests/core/test_pipeline.py` | End to end: summary == output, cancel, loop, verify, PNG, size and flicker (24) | [page](tests/core/test_pipeline.md) |
-| `tests/core/test_estimate.py` | `pipeline.estimate_size` accuracy bounds, direction under edits, speed, no files; `write_stream` into a buffer (6) | [page](tests/core/test_estimate.md) |
+| `tests/core/test_estimate.py` | `pipeline.estimate_size` accuracy bounds, direction under edits, speed, no files; `write_stream` into a buffer (7) | [page](tests/core/test_estimate.md) |
 | `tests/core/test_selftest.py` | Self-test passes fast and catches broken internals (6) | [page](tests/core/test_selftest.md) |
 | `tests/ui/__init__.py` | Empty package marker | [page](tests/ui/__init__.md) |
-| `tests/ui/conftest.py` | `gif_path` (8×40×30 GIF) and `doc` (open `Document`) fixtures | [page](tests/ui/conftest.md) |
+| `tests/ui/conftest.py` | autouse `_drain_workers` (drain the pool after every UI test), `gif_path` (8×40×30 GIF) and `doc` (open `Document`) fixtures | [page](tests/ui/conftest.md) |
 | `tests/ui/test_document.py` | `Document` apply/undo/merge/delete/index/selection (11) | [page](tests/ui/test_document.md) |
-| `tests/ui/test_workers.py` | `run_async` threading, errors, progress (2) | [page](tests/ui/test_workers.md) |
+| `tests/ui/test_workers.py` | `run_async` threading, errors, progress, relay release (3) | [page](tests/ui/test_workers.md) |
 | `tests/ui/test_qt_image.py` | `pil_to_qimage` pixels/ownership, brush (2) | [page](tests/ui/test_qt_image.md) |
-| `tests/ui/test_smoke.py` | Qt renders headlessly (1) | [page](tests/ui/test_smoke.md) |
-| `tests/ui/test_settings_panel.py` | Controls → `EditState`, merge keys, undo refresh, aspect lock, presets, summary, invalid edits, Generate button (18) | [page](tests/ui/test_settings_panel.md) |
-| `tests/ui/test_canvas.py` | Frame pixels, fit/zoom, deleted overlay, placeholder, `map_to_image`, wheel, Space/middle-drag pan (15) | [page](tests/ui/test_canvas.md) |
+| `tests/ui/test_smoke.py` | Qt renders headlessly; failed self-test → plain dialog, exit 1 (2) |
+| `tests/ui/test_messages.py` | Every load/write error → plain explanation with details, no jargon; Windows locked file (22) | [page](tests/ui/test_messages.md) |
+| `tests/ui/test_settings_panel.py` | Controls → `EditState`, merge keys, undo refresh, aspect lock, presets, summary, invalid edits, Generate button, every input explains its limits (19) | [page](tests/ui/test_settings_panel.md) |
+| `tests/ui/test_canvas.py` | Frame pixels, fit/zoom, deleted overlay, placeholder, `map_to_image`, wheel, Space/middle-drag pan, expensive frames off-thread (16) | [page](tests/ui/test_canvas.md) |
 | `tests/ui/test_timebar.py` | Mapping, seek, handles, snapping/Alt, one drag = one undo step, keyboard, painting speed (19) | [page](tests/ui/test_timebar.md) |
 | `tests/ui/test_filmstrip.py` | Model roles, thumbnails, selection/current sync, keys, context menu, stale results (16) | [page](tests/ui/test_filmstrip.md) |
 | `tests/ui/test_player.py` | Looping, preview mode, stepping, drift/skip/rebase with a fake clock, resync on edits and scrubs (22) | [page](tests/ui/test_player.md) |
@@ -76,13 +78,17 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/ui/test_crop_panel.py` | `CropPanel` controls → `CropRect`, clamping, aspect lock, merge keys, undo refresh, canvas sync, buttons, tick semantics, errors (32) | [page](tests/ui/test_crop_panel.md) |
 | `tests/ui/test_crop_item.py` | `CropItem` real mouse drags at zoom 4, one undo step per drag, clamping/minimum, `handle_at`, cursors, nudge/resize/activate/reset, tool on/off, painting (35) | [page](tests/ui/test_crop_item.md) |
 | `tests/ui/test_preview.py` | `PreviewService` geometry rendering, async delivery, stale results, cache, coalescing, thread safety, debounced estimate, dispose (27) | [page](tests/ui/test_preview.md) |
-| `tests/ui/test_main_window.py` | Integration: open/drop/errors, actions + real shortcut, shortcut bindings, trim I/O, Generate + cancel + empty guard + warnings, PNG, `app.main` (17) | [page](tests/ui/test_main_window.md) |
-| `tests/ui/test_m3_integration.py` | M3 wiring: canvas geometry preview, Size line and crop panel in the settings panel, crop tool rules, real canvas drag, Ctrl+arrow nudge/resize, Generate applies the crop (15) | [page](tests/ui/test_m3_integration.md) |
+| `tests/ui/test_main_window.py` | Integration: open/drop/errors, actions + real shortcut, shortcut bindings, trim I/O, Generate + cancel + empty guard + warnings, PNG, `app.main`; M4: explained errors, partial load, close during Generate, small screen, Space tap/drag (24) | [page](tests/ui/test_main_window.md) |
+| `tests/ui/test_m3_integration.py` | M3 wiring: canvas geometry preview, Size line and crop panel in the settings panel, crop tool rules, real canvas drag, Ctrl+arrow nudge/resize, crop actions follow visibility, Generate applies the crop (18) | [page](tests/ui/test_m3_integration.md) |
 
 ## Scripts: `scripts/`
 | File | Summary | Page |
 |---|---|---|
-| `scripts/test.sh` | Lint + all tests headlessly in the container (sets `LD_LIBRARY_PATH`, offscreen Qt) | [page](scripts/test.md) |
+| `scripts/test.sh` | Lint + all tests headlessly in the container (`LD_LIBRARY_PATH`, offscreen Qt on a virtual 4K screen, per-run temp dir under `out/`, `--capture=sys`) | [page](scripts/test.md) |
+| `scripts/test-hidpi.sh` | The UI tests at `QT_SCALE_FACTOR` 1.5 and 2 | [page](scripts/test-hidpi.md) |
+| `scripts/fuzz_decoder.py` | Manual fuzzer: damaged corpus GIFs must load or be refused cleanly (no other exception, no hang) | [page](scripts/fuzz_decoder.md) |
+| `scripts/stress_probe.py` | Manual probe: big/corrupt GIFs through the real window, GUI-thread stalls per phase | [page](scripts/stress_probe.md) |
+| `scripts/offscreen-screen.json` | Virtual 3840×2160 screen for Qt's offscreen platform | [config-files](config-files.md#scriptsoffscreen-screenjson) |
 | `scripts/fetch-devlibs.sh` | Fetch, SHA-256-check and unpack Debian `libegl1` into `.devlibs/` | [page](scripts/fetch-devlibs.md) |
 
 ## Config and repo files

@@ -34,13 +34,15 @@ Tests drive the real child widgets (`setValue`, `setChecked`, `click`, `activate
 | `test_generate_signal` | Click emits `generateRequested`. |
 | `test_generate_disabled_after_close` | `doc.close()` disables groups and Generate. |
 | `test_empty_document_everything_disabled` | A `Document()` with no source builds, is fully disabled, and forced edits push nothing. |
+| `test_every_input_explains_its_limits` (M4) | Every `QAbstractSpinBox`, `QComboBox`, `QSlider` and `QAbstractButton` in the panel, except the crop panel's and the Generate button, has a non-empty tooltip **equal to** its accessible description (i.e. it went through `_explain`); the FPS tooltip names 50 and 20 ms, colours 256, width 8,192. Failures list the offending controls' accessible names. |
 
 ## Invariants & gotchas
 - Must run with `QT_QPA_PLATFORM=offscreen` and the project-local libEGL (`scripts/test.sh`).
 - Expected strings contain `×` via `settings_panel.TIMES` to keep ruff's ambiguous-character rule quiet.
 
 ## Tests
-- This file is the test. Gaps: no pixel/visual checks of the summary colours or layout in a scroll area.
+- This file is the test (19 cases). Gaps: no pixel/visual checks of the summary colours or layout in a scroll area; the tooltip *wording* is not checked (a wrong claim in a tooltip would pass; one was caught by review in M4).
 
 ## History
 - Milestone 2: created with the settings panel.
+- `39e533b` (M4): `test_every_input_explains_its_limits`.

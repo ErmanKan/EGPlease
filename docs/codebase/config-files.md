@@ -1,6 +1,6 @@
 # Configuration and repo-level files
 
-> One page for the non-Python files at the repo root and in `.github/`: what each one configures and why.
+> One page for the non-Python files at the repo root, in `.github/` and the one data file in `scripts/`: what each one configures and why.
 
 ## Where it sits
 - **Layer:** tooling
@@ -17,6 +17,7 @@
 | [`.gitignore`](#gitignore) | Keeps venvs, caches, build output, `.devlibs/` and scratch files out of git. |
 | [`AGENTS.md`](#agentsmd) | The contributor contract: rules, commands, architecture rules, interfaces, definition of done. |
 | [`README.md`](#readmemd) | Project intro, status, features, run/check commands, keyboard shortcuts, link to the docs. |
+| [`scripts/offscreen-screen.json`](#scriptsoffscreen-screenjson) | The virtual 3840×2160 screen for Qt's offscreen platform in `scripts/test.sh` (M4). |
 
 ## How it works
 
@@ -44,8 +45,20 @@ The three runtime pins, commented as a mirror of `pyproject`. Nothing enforces t
 - No libEGL step is needed: Windows Qt wheels bring their own platform plugins.
 - Not yet: the Nuitka build artifact from the plan (M5); a pip cache.
 
+### `scripts/offscreen-screen.json`
+```json
+{"screens": [{"name": "virtual", "x": 0, "y": 0, "width": 3840, "height": 2160, "logicalDpi": 96, "dpr": 1}]}
+```
+A configuration file for Qt's `offscreen` platform plugin, passed as `QT_QPA_PLATFORM=offscreen:configfile=$PWD/scripts/offscreen-screen.json` by [`scripts/test.sh`](scripts/test.md). It declares one virtual screen of **3840×2160** physical pixels at 96 DPI with a device pixel ratio of 1.
+
+*Why (M4, `d3f0297`):* the default offscreen screen is 800×600 physical pixels. Under `QT_SCALE_FACTOR=2` (the 200 % HiDPI pass, [`scripts/test-hidpi.sh`](scripts/test-hidpi.md)) that is only **400×400 logical** pixels, smaller than the test windows. Qt does not deliver mouse events at positions outside the screen, so a timebar test that clicked beyond x=400 failed at 200 %. That was a limitation of the test environment, not an app bug. A 4K virtual screen is 1920×1080 logical at 200 %, larger than any test window. `dpr` stays 1 here; the scale factor comes from `QT_SCALE_FACTOR`.
+
+Side effect: `MainWindow._fit_to_screen` sees this large screen in tests, so the window opens at its preferred 1300×820. The small-screen behaviour is tested by patching `availableGeometry` instead.
+
+CI (Windows) does not use this file: it runs plain `pytest` with `QT_QPA_PLATFORM=offscreen` at scale 1, where the default screen is large enough.
+
 ### `.gitignore`
-Python caches and venvs (`__pycache__/`, `.venv/`, `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `*.egg-info/`, `build/`, `dist/`), Nuitka output (`*.build/`, `*.dist/`, `*.onefile-build/`), editor/OS files (`.vscode/`, `.idea/`, `Thumbs.db`, `desktop.ini`), the project-local Linux libs `.devlibs/`, and scratch output (`*.tmp.gif`, `/out/`).
+Python caches and venvs (`__pycache__/`, `.venv/`, `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `*.egg-info/`, `build/`, `dist/`), Nuitka output (`*.build/`, `*.dist/`, `*.onefile-build/`), editor/OS files (`.vscode/`, `.idea/`, `Thumbs.db`, `desktop.ini`), the project-local Linux libs `.devlibs/`, and scratch output (`*.tmp.gif`, `/out/`). Since M4 `/out/` also holds every test and tool temp file: `out/pytest-tmp/run-<pid>/` (pytest's `tmp_path`, per run), `out/fuzz/`, `out/stress/`, and soak worktrees; nothing is written to the container's `/tmp`.
 
 Note: the encoder's temporary files are named `.<name>.<uuid>.tmp` and are not ignored. They only exist while a write is in progress and are always deleted.
 
@@ -56,13 +69,13 @@ The contract every contributor (human or agent) follows:
 - **Environment note:** the libEGL setup.
 - **Architecture rules:** no Qt in core; immutable `EditState` changed only via undo commands; `plan_output` is the only planner; pipeline order; QPixmap only on the GUI thread.
 - **Gate 1 product decisions.**
-- **Interface blocks** for core and UI (the `Document` hub, helpers, and each M2/M3 widget's and service's constructor, signals and public methods), with widget rules and the merge-key rule.
+- **Interface blocks** for core and UI (the `Document` hub, helpers, `messages`, and each M2/M3 widget's and service's constructor, signals and public methods, plus the M4 additions), with widget rules, the worker rules and the merge-key rule.
 - **Documentation and test rules**, conventional commits, the definition of done.
 
 Known drift from the code is listed in [`docs/03-architecture.md`](../03-architecture.md#known-drift-between-docs-and-code).
 
 ### `README.md`
-The front page: a short intro, the status (Milestones 1–3 done, M4 then M5 next), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`) and how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py`.
+The front page: a short intro, the status (Milestones 1–4 done, M5 next), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`) and how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py`.
 
 ## Invariants & gotchas
 - Pins appear in three places (`pyproject.toml`, `requirements*.txt`, the AGENTS.md "Stack" line). Change all three together.
@@ -76,3 +89,5 @@ The front page: a short intro, the status (Milestones 1–3 done, M4 then M5 nex
 - `cc9f0fa`: `.devlibs/` added to `.gitignore`.
 - `0137178`: AGENTS.md gained the UI interfaces and documentation rules.
 - End of M2 (docs pass): AGENTS.md gained the per-widget interfaces, `run_async(pool=)`, the full pipeline API and the corrected libEGL trust statement; README rewritten for the M2 status.
+- `d3f0297` (M4): `scripts/offscreen-screen.json`.
+- End of M4 (docs pass): AGENTS.md gained the M4 interfaces (messages, `show_explanation`, `spaceTapped`, `frames_to_decode`) and the worker and test-temp rules; README status M1–M4.

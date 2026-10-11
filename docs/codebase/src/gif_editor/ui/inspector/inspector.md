@@ -31,6 +31,7 @@ Inspector (QVBoxLayout, margins 0, spacing 4)
 - Every child connects to `Document` itself in its constructor. The inspector forwards nothing: open, edits and the playhead reach each child through `Document` signals.
 
 ## Invariants & gotchas
+- The container is named **"Frame inspector"** (`setAccessibleName`, M4) so screen readers can announce the right panel; its children have their own names.
 - Keep it logic-free. New inspector behaviour belongs in a child widget (talking to `Document`) or in the main window (actions, dialogs).
 - The order in the layout is the visual order; only the canvas stretches, so the timebar and filmstrip keep their fixed heights when the window is resized.
 
@@ -39,3 +40,4 @@ Inspector (QVBoxLayout, margins 0, spacing 4)
 
 ## History
 - `be70f38`: written by the orchestrator when integrating the M2 widgets ([dev log, Milestone 2](../../../../../04-development-log.md#milestone-2-window-and-inspector)).
+- `d3f0297` (M4): accessible name "Frame inspector" (found unnamed by the M4 accessibility audit; see [dev log, Milestone 4](../../../../../04-development-log.md#milestone-4-hardening)).

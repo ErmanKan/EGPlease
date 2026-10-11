@@ -180,3 +180,123 @@ Verification after the fixes: 644 passed + 2 xfailed, three full runs in a row.
 
 ### Documentation pass (end of M3)
 New pages for `tests/core/test_estimate.py` and `tests/ui/test_m3_integration.py`; the pipeline, encoder, canvas, settings panel and main window pages updated; the codebase index completed (and its `test_main_window.py` link fixed); the architecture page shows the M3 widget tree, data flow and the merge-key scheme; README, AGENTS.md and RESUME-HERE describe the state after M3. Stale post-M2 details were corrected on the way (shortcut table, Ctrl+G guard, Generate warnings, the `fetch-devlibs.sh` comment).
+
+## Milestone 4: Hardening
+
+Goal (from [02-plan.md §6](02-plan.md#6-milestones)): large and corrupt files must not freeze or crash the app, and it must work at 150 % and 200 % scaling. The work list from [RESUME-HERE](RESUME-HERE.md) was: input limits explained in the UI, plain corrupt-file messages, a HiDPI pass, an accessibility audit, consistent error dialogs. Along the way the test suite showed two rare native failures (one crash, one hang) that took most of the milestone's care; they are described honestly below, including what is still unknown.
+
+### Commits
+| Commit | Delivered |
+|---|---|
+| `d3f0297` | HiDPI test pass (virtual 4K offscreen screen, `scripts/test-hidpi.sh`); accessible names for three unnamed containers; `GifLoadError.kind` / `.info`; `scripts/stress_probe.py` |
+| `95b4f03` | Plain-language error dialogs: `ui/messages.py`, `MainWindow.show_explanation` (headline, what to do, technical details behind Show Details…); Information dialog for a partly-loaded file; `tests/ui/test_messages.py` |
+| `c4b9329` | Workers: a relay is freed only after its worker has left `emit()`; autouse `_drain_workers` fixture; test temp files inside the project (`--basetemp`, `--capture=sys`) |
+| `9361dd6` | The window fits the screen at high scaling; Generate pinned below the settings; closing during Generate closes after the cancel; `app.main` waits for workers before exit; one temp folder per test run |
+| `0b07218` | Space+drag pans the canvas (the canvas claims Space via `ShortcutOverride`; a tap still plays) |
+| `39e533b` | Every setting explains its range and why (tooltip + accessible description); plain self-test failure dialog |
+| `c254cc1` | `scripts/fuzz_decoder.py`: damaged corpus files must load or be refused cleanly |
+| `9ab961f` | Pool jobs are plain callables, not a Python `QRunnable` subclass |
+| `5c40830` | Expensive source frames render off the GUI thread (scrub stall 384 ms → 28 ms); non-blocking `GifSource.frames_to_decode`; no tracebacks for handled worker errors |
+
+### HiDPI: the test screen was too small, not the app (`d3f0297`)
+Running the UI tests at `QT_SCALE_FACTOR=2` made one timebar test fail. The cause was the test environment: Qt's default offscreen screen is **800×600 physical pixels**, which at 200 % is only **400×400 logical** pixels, smaller than the test windows. Qt does not deliver mouse events outside the screen, so a click past x=400 never arrived. The fix is a configuration file, [`scripts/offscreen-screen.json`](codebase/config-files.md#scriptsoffscreen-screenjson), that gives the offscreen platform one virtual **3840×2160** screen; `scripts/test.sh` passes it with `QT_QPA_PLATFORM=offscreen:configfile=…`. The new [`scripts/test-hidpi.sh`](codebase/scripts/test-hidpi.md) runs `tests/ui` at 1.5 and 2. At the end of the milestone: **278 passed at 150 %, 278 passed at 200 %**. No app code needed a HiDPI fix: painting already used cosmetic pens and logical pixels.
+
+### The window did not fit the screen (`9361dd6`)
+The window opened at a fixed 1300×820. Display scaling shrinks the screen in logical pixels, and the measured logical sizes were all smaller than that:
+
+| Screen and scaling | Logical size |
+|---|---|
+| 1366×768 at 150 % | 911×512 |
+| 1920×1080 at 150 % (the most common laptop setup) | 1280×720 |
+| 1920×1080 at 200 % | 960×540 |
+| 1280×800 at 125 % | 1024×640 |
+
+So on every one of these the bottom of the window, with the Generate button, was off-screen. Now `MainWindow._fit_to_screen` opens at the preferred 1300×820 but **at most 90 % of the available screen**, centred. The window's minimum size is **779×344**, which fits all four. The Generate button also moved **out of the settings scroll area** into a pinned footer below it: the main window removes it from the panel's layout, while the panel still owns the button and its `generateRequested` signal. At 150 % on a 1080p laptop the settings column scrolls, and the main action must not scroll away with it.
+
+Remaining limitation: at 911×512 the canvas gets only about **184 px** of height, because the filmstrip has a fixed height of 140 px.
+
+### Accessibility (`d3f0297`, `39e533b`)
+- **Audit:** every control already had an accessible name except three containers: the `Inspector`, the settings `QScrollArea` and the `CropPanel`. They are now "Frame inspector", "Output settings" and "Crop settings". The tab order was checked and found logical, so it was not changed.
+- **Inputs explain their limits.** Spin boxes silently clamp typed values to their range, which looks like the app ignoring you. `SettingsPanel._explain(widget, text)` sets the same text as tooltip and accessible description, stating each range **and why**: FPS max 50 because GIF delays are whole hundredths of a second and viewers slow down delays under 20 ms; at most 256 colours per GIF; 8,192 px maximum side; for speed, frames that would be shorter than 20 ms are merged and the summary shows how many. `test_every_input_explains_its_limits` enforces that every input has such a text.
+- **A wrong claim, caught in review.** A draft of the speed tooltip said that very high speeds make a GIF play *slower*. That is what happens with a naive writer, not with ours: the timeline never writes a delay under 20 ms, it folds the short frames into their neighbours. The text was corrected before commit. The test checks that the texts exist and name the key numbers; it cannot check that a claim is true, so tooltip wording must be checked against `core/timeline.py` by hand.
+
+### Errors in plain language (`d3f0297`, `95b4f03`, `39e533b`)
+Before M4 the dialogs showed the core's technical messages ("Could not open x.gif:\nCanvas 70000x2 exceeds the maximum side of 8192 px"). Now:
+1. The core says *why*: `GifLoadError` has a `.kind` (`NOT_FOUND`, `IS_DIRECTORY`, `UNREADABLE`, `EMPTY`, `NOT_GIF`, `TOO_LARGE`, `TOO_MANY_FRAMES`, `MALFORMED`) and an `.info` dict with the numbers. The message text is unchanged, so tests that match it still pass.
+2. The new [`ui/messages.py`](codebase/src/gif_editor/ui/messages.md) turns an exception into an `Explanation(title, headline, body, details)`: `explain_load_error`, `explain_load_warnings` and `explain_generate_error`. For write errors it maps `errno` `EACCES`/`EPERM`, `ENOSPC`, `ENOENT`, `ENAMETOOLONG` and `MemoryError`, with a fallback. On Windows a file locked by another program fails with `EACCES` too, so `winerror` 32/33 (sharing/lock violation) is checked first and reported as "open in another program", not as "no permission". Every write-failure message says **"Nothing was written; any existing file with that name is unchanged."**, which is true because both writers use a temp file + rename.
+3. `MainWindow.show_explanation(expl, icon)` shows the headline, the body as informative text, and the technical details behind Qt's **Show Details…** button. It keeps `last_error` (headline + body) and `last_dialog` for the headless tests.
+4. A **partly-loaded** (truncated) file now gets an Information dialog ("“x.gif” is damaged; 3 frames could be loaded.") instead of a status-bar line that vanished after 8 s, because a partial file changes the result.
+5. The **startup self-test** failure (only possible with a broken build) now says "GIF Editor can't start because one of its components is not working… Download it again", with the technical text kept as details.
+
+`tests/ui/test_messages.py` covers the branches with real files where possible and checks that no jargon ("Errno", "malformed", "decodable", "exceeds"…) appears in a headline or body. (Not covered: the `UNREADABLE` branch, which needs an existing file that cannot be read.)
+
+### Shutdown (`9361dd6`)
+- **Closing during Generate.** The close used to be ignored with "close again in a moment". Now the first close cancels Generate and sets `_close_when_idle`; when the worker reports back, `finish()` closes the window with `QTimer.singleShot(0, self.close)`. One click is enough, and nothing is torn down under a running worker.
+- **Waiting for workers at exit.** `app.main` calls `QThreadPool.globalInstance().waitForDone(10_000)` after `app.exec()` returns, so Python's interpreter teardown never runs while a pool thread (a preview render, the size estimate, a thumbnail batch) is still alive.
+
+### Space+drag pan, finally (`0b07218`)
+Known since M2: the window's Space play/pause shortcut ate the key, so the canvas's Space+drag pan never started. Qt offers every key to the focused widget as a `ShortcutOverride` event before firing a window shortcut. `FrameCanvas.event` now **accepts** that event for plain Space while a file is open, so the canvas receives Space as a normal key. A tap without a mouse press emits the new `spaceTapped` signal, which the main window connects to `player.toggle`, so tapping Space on the canvas still plays and pauses. With another widget focused, Space plays through the window action as before. The drag test **fails with the fix disabled** (checked), so it really tests the fix.
+
+### Big GIFs: the scrub stall (`d3f0297`, `5c40830`)
+The new [`scripts/stress_probe.py`](codebase/scripts/stress_probe.md) opens hard files through the real `MainWindow` and measures GUI-thread stalls with a 10 ms `QTimer` (the gap between ticks is how long the window was frozen), for open, scrubbing backwards, playing, preview and Generate.
+- 1280×720×150 frames: open 0.69 s, worst stall 51 ms. Fine.
+- 1920×1080×200 frames (bigger than the 512 MB frame cache): open 1.9 s, but **scrubbing backwards stalled up to 384 ms** (10 stalls over 100 ms). The canvas decoded the frame on the GUI thread, and a backward step past the cache means re-compositing up to ~30 full frames from a checkpoint.
+
+The fix:
+1. `GifSource.frames_to_decode(i)` says how many frames `frame(i)` would composite (mirroring `_resume_point`, without copying any canvas).
+2. The canvas computes `frames × pixels`; above `SYNC_DECODE_PIXELS = 4,000,000` (about 25 ms) it asks `PreviewService.request_frame(i)` (with geometry off, that renders the plain source frame; latest request wins) and keeps the old frame up until the new one arrives (`_awaiting_source`). Small GIFs and playback (the next frame costs 1) stay synchronous.
+3. **The first version still stalled 643 ms.** `frames_to_decode` waited for the decoder lock, which the background render was holding. It now never blocks: if another thread holds the lock it returns `GifSource.BUSY` (a huge cost), so the canvas goes asynchronous. Result: **worst stall 28 ms, none over 100 ms.**
+
+The corrupt corpus files in the probe showed the new plain messages.
+
+### Fuzzing the decoder (`c254cc1`)
+[`scripts/fuzz_decoder.py`](codebase/scripts/fuzz_decoder.md) damages the corpus GIFs (byte flips, truncation, inserted junk, header bytes, zero runs, duplicated slices), opens each with `GifSource`, renders every frame, and allows 10 s per case. **22,750 damaged files** over seeds 1–3: about **59 %** refused with `GifLoadError`, **28 %** loaded with warnings, **13 %** loaded; **0 unexpected exceptions, 0 hangs**. The slowest case took 711 ms (a damaged header declaring a large canvas). It writes only inside `out/fuzz/`.
+
+### Stability: one crash and one hang in the test suite (`c4b9329`, `9ab961f`)
+This part is told in full because **the root cause is not confirmed**.
+
+**What happened.**
+1. After the test temp files were moved onto the project drive, one full-suite run died with a **segmentation fault in a native pool thread** (1 run of about 16). The main thread was in `pathlib.stat` at that moment, i.e. doing nothing unusual.
+2. Later, one run **deadlocked** at about 97 %. A `faulthandler` dump (triggered with `SIGABRT`) showed the GUI thread "Garbage-collecting" inside `run_async`, and a pool thread at the entry of the Python `QRunnable` subclass's `run()` method.
+
+**How it was investigated.** Probes started **120,000 tasks** through `run_async`, with both `QCoreApplication` and `QApplication`, with forced garbage collection. They reproduced **neither** failure.
+
+**What was changed** (each change removes a plausible cause; none is proven to be *the* cause):
+- (a) **Relay lifetime** (`c4b9329`). A worker emits `finished`, and the GUI thread could run the callback and delete the relay before the worker had returned from `emit()`. Deleting a `QObject` while another thread is inside its emit is undefined behaviour. Now the worker sets a `threading.Event` (`exited`) when it is done, and `_release` frees the relay only after that, retrying with `QTimer.singleShot(1)`.
+- (b) **Drain after every UI test** (`c4b9329`). The autouse `_drain_workers` fixture in `tests/ui/conftest.py` (it depends on `qtbot`, so it tears down first) waits for the pool and processes events after each UI test. Before, a worker from one test could still be calling back while the next test set up, an ordering that never happens in the app.
+- (c) **No Python `QRunnable` subclass** (`9ab961f`). Jobs are plain callables passed to `QThreadPool.start(callable)`. With a subclass, Qt calls a Python-overridden `run()` on a C++-owned object from a pool thread, and PySide must keep the Python wrapper alive and dispatch the override across threads; the deadlock dump pointed exactly there. A plain callable has no such wrapper.
+- Also (`5c40830`): workers print a traceback only when no `on_error` handler exists, so the test output (and a user's console) is not filled with tracebacks of errors that were handled.
+
+**Soak test.** A 30-run soak on the frozen HEAD (a git worktree under `out/`, see [06-testing](06-testing.md#soak-test-repeated-full-runs)) checks whether either failure comes back:
+
+**30 of 30 runs exited 0** (679 passed + 2 xfailed each, 36-49 s per run); no exit 1, no 124 (timeout/hang), no 139 (segmentation fault). Root cause of the two pre-fix failures remains unidentified, but nothing reproduced in 30 consecutive full runs on the fixed code (plus the 18 runs during development: 48 clean runs in total since `9ab961f`/`c4b9329`).
+
+**Still unknown:** what exactly crashed and what exactly deadlocked. If either appears again, the `faulthandler` dump (`kill -ABRT <pytest pid>` for a hang) is the first thing to collect.
+
+### Test infrastructure (`c4b9329`, `9361dd6`)
+- **Temp files inside the project.** Earlier probes and pytest itself wrote to the container's `/tmp`, a violation of the project's hard rule (files only inside the repo). It was cleaned up. `scripts/test.sh` now passes `--basetemp=out/pytest-tmp/run-<pid>`: **one folder per run**, and folders of runs that have exited are removed by the next run.
+- **Why per run.** pytest empties `--basetemp` when it starts. With one shared folder, a second run wiped the corpus files of a run in progress: **40 failures** in a parallel run.
+- **Why `--capture=sys`.** pytest's default `fd` capture uses temp files that are deleted while still open; the `F:` drive mount rejects that, so `TMPDIR` cannot simply point into the project. `sys` capture keeps output in memory.
+- **Cost:** the full suite went from about **15 s to about 38 s**, because the temp files now live on the mounted drive.
+
+### The orchestrator's own mistakes
+Recorded so they are not repeated:
+1. **Probes wrote to `/tmp`.** The worker-crash probes and the pytest runs used the container's `/tmp`, which the hard rules forbid. Cleaned up; all tools now write under `out/`.
+2. **A test run started next to a running soak loop** shared its temp folder and wiped it (the 40 failures above). This is what led to the per-run folders. Lesson: never start a second test run that shares a temp folder with a running one.
+3. **`pkill -f` killed its own shell.** Stopping the soak loop with `pkill -f <pattern>` matched the orchestrator's own command line (which contained the pattern), so it killed the shell it was running in. Lesson: kill by PID, or use a pattern that cannot match the command doing the killing.
+4. **A wrong tooltip claim** (speed) was written and only caught in review (see Accessibility above).
+
+### Verification
+- Full suite: **679 passed + 2 xfailed** (the documented Pillow disposal-2 differences), about 39 s; ruff format and lint clean.
+- HiDPI: `scripts/test-hidpi.sh` **278 passed** at 150 % and **278 passed** at 200 %.
+- Fuzz: **22,750** damaged files, 0 unexpected exceptions, 0 hangs.
+- Stress probe: 1080p×200 scrub worst stall **384 → 28 ms**, no stall over 100 ms.
+- Soak: see the SOAK RESULT line in the stability section above.
+
+### Known limitations (carried to M5)
+- The filmstrip has a fixed height of 140 px, so on the smallest screens (911×512 logical) the canvas gets only about 184 px.
+- The size estimate can be low (0.67×) on long GIFs whose middle is unrepresentative.
+- The root cause of the one crash and the one hang is unconfirmed; three plausible causes were removed and a soak run checks the result.
+
+### Documentation pass (end of M4)
+New pages for `ui/messages.py`, `tests/ui/test_messages.py`, `scripts/test-hidpi.sh`, `scripts/stress_probe.py` and `scripts/fuzz_decoder.py`; `offscreen-screen.json` added to the config page; the workers, decoder, canvas, main window, settings panel, app, `test.sh`, UI conftest and test pages updated; the architecture page's threading section rewritten and an error-flow section added; this section; the testing guide (HiDPI, fuzz, stress, soak, temp-dir policy); README, RESUME-HERE and AGENTS.md describe the state after M4. Stale test counts on two older pages (`test_estimate`, `test_m3_integration`) were corrected on the way.

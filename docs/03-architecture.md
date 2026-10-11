@@ -1,6 +1,6 @@
 # 03 — Architecture (the code as it is today)
 
-This page describes the code on `main` as of the end of Milestone 3 (crop and live preview). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
+This page describes the code on `main` as of the end of Milestone 4 (hardening). For the *intended* design see [02-plan.md](02-plan.md); for how we got here see [04-development-log.md](04-development-log.md). Every file has its own page under [codebase/](codebase/INDEX.md).
 
 ## 1. Layers
 
@@ -14,6 +14,7 @@ flowchart TB
         CMD[SetStateCommand<br/>QUndoStack]
         WK[run_async<br/>QThreadPool]
         QI[qt_image<br/>PIL → QImage]
+        MSG[messages<br/>exception → plain explanation]
     end
     subgraph CORE["core/ (pure Python + Pillow + numpy, no Qt)"]
         MOD[models<br/>EditState]
@@ -32,6 +33,8 @@ flowchart TB
     MW -->|set_source · close · undo_stack| DOC
     W -->|calls / signals| DOC
     MW --> WK
+    MW --> MSG
+    MSG -->|GifLoadError.kind| DEC
     DOC --> CMD
     W --> WK
     W --> QI
@@ -42,7 +45,7 @@ flowchart TB
 ```
 
 - **core** is a headless GIF engine. It has no Qt imports (an AGENTS.md rule), so it is fully unit-testable and could back a CLI. It depends only on Pillow and numpy. Pillow is used narrowly: LZW decode/encode, quantisation, resizing, and PNG writing.
-- **ui** is PySide6. Widgets talk **only** to `Document`; the main window composes them and wires menu actions to them (§9). Long work goes through `run_async`.
+- **ui** is PySide6. Widgets talk **only** to `Document`; the main window composes them and wires menu actions to them (§9). Long work goes through `run_async`. `ui/messages.py` is the one ui module without Qt: it turns exceptions into the texts the main window's dialogs show (§7).
 
 ## 2. Directory tree
 
@@ -56,18 +59,23 @@ gif-editor/
 ├─ .gitignore                     venv/caches/build output, .devlibs/, scratch
 ├─ .github/workflows/ci.yml       Windows CI: ruff + pytest (offscreen Qt)
 ├─ scripts/
-│  ├─ test.sh                     lint + all tests headlessly in the Linux container
+│  ├─ test.sh                     lint + all tests headlessly in the Linux container (temp files under out/)
+│  ├─ test-hidpi.sh               the UI tests at 150 % and 200 % scaling
+│  ├─ offscreen-screen.json       virtual 3840×2160 screen for the offscreen Qt platform
+│  ├─ fuzz_decoder.py             manual: damaged GIFs must load or be refused cleanly
+│  ├─ stress_probe.py             manual: GUI-thread stalls with big/corrupt GIFs in the real window
 │  └─ fetch-devlibs.sh            fetch + SHA-check + unpack libegl1 into .devlibs/
 ├─ packaging/licenses/            (empty, M5: licence texts)
 ├─ src/gif_editor/
 │  ├─ __init__.py                 package docstring + __version__
 │  ├─ __main__.py                 `python -m gif_editor` → app.main()
-│  ├─ app.py                      main(): QApplication, Pillow self-test, MainWindow, optional path arg
+│  ├─ app.py                      main(): QApplication, Pillow self-test, MainWindow, optional path arg, wait for pool at exit
 │  ├─ resources/icons/            (empty; buttons use Qt standard icons)
 │  ├─ core/
 │  │  ├─ __init__.py              package marker ("no Qt")
 │  │  ├─ models.py                EditState, CropRect, OutputSize, Quality (immutable)
-│  │  ├─ decoder.py               GifSource: block parser, numpy compositor (browser disposal), LRU + checkpoints
+│  │  ├─ decoder.py               GifSource: block parser, numpy compositor (browser disposal), LRU + checkpoints,
+│  │  │                           GifLoadError.kind, non-blocking frames_to_decode
 │  │  ├─ timeline.py              plan_output(): trim → delete → speed → fps → min delay → cs rounding → split
 │  │  ├─ render.py                crop, premultiplied LANCZOS resize, shared palette, quantize (anti-shimmer)
 │  │  ├─ encoder.py               write_gif()/write_stream(): own container, lossless diff frames, atomic, progress/cancel/verify
@@ -77,14 +85,17 @@ gif-editor/
 │     ├─ __init__.py              package marker
 │     ├─ document.py              Document: the hub every widget talks to
 │     ├─ commands.py              SetStateCommand (old → new EditState, gesture merging)
-│     ├─ workers.py               run_async(): QThreadPool + GUI-thread callbacks
+│     ├─ workers.py               run_async(): plain callables on QThreadPool + GUI-thread callbacks
+│     ├─ messages.py              Explanation + explain_*(): plain-language error texts (no Qt)
 │     ├─ qt_image.py              pil_to_qimage(), checkerboard_brush()
 │     ├─ settings_panel.py        SettingsPanel: timing/size/crop/quality, live summary + size estimate, Generate button
 │     ├─ crop_panel.py            CropPanel: numeric Crop group (embedded in the settings panel)
-│     ├─ main_window.py           MainWindow: layout, actions/shortcuts, Crop menu, open, Generate, Save frame
+│     ├─ main_window.py           MainWindow: layout (fits the screen, pinned Generate), actions/shortcuts, Crop menu,
+│     │                           open, Generate, Save frame, show_explanation
 │     └─ inspector/
 │        ├─ __init__.py           package marker
-│        ├─ canvas.py             FrameCanvas: zoomable/pannable frame view, deleted overlay, geometry preview
+│        ├─ canvas.py             FrameCanvas: zoomable/pannable frame view, deleted overlay, geometry preview,
+│        │                        async source frames, Space+drag (spaceTapped)
 │        ├─ crop_item.py          CropItem: draggable crop rectangle in the canvas scene
 │        ├─ preview.py            PreviewService: off-thread preview frames + debounced size estimate (QObject)
 │        ├─ timebar.py            TimeBar: playhead, ticks, snapping trim handles
@@ -97,7 +108,8 @@ gif-editor/
    ├─ gifgen.py                   simple GIFs via Pillow
    ├─ corpus.py                   raw GIF89a writer + reference compositor + 13 entries
    ├─ core/test_*.py              one per core module + corpus tests
-   └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, one file per widget, main-window + M3 integration
+   └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, messages, one file per widget, main-window + M3 integration
+                                  (conftest's autouse _drain_workers drains the pool after every UI test)
 ```
 
 ## 3. End-to-end data flow: open → edit → preview → generate
@@ -132,7 +144,7 @@ sequenceDiagram
     V->>D: set_current_index(i)
     D-->>V: currentIndexChanged(i)
     V->>WK: thumbnail(i) → pil_to_qimage (filmstrip)
-    Note over V: canvas: source.frame(i) on the GUI thread (cache hit),<br/>or, with Preview edits on, PreviewService renders<br/>crop + resize on the pool → frameReady(i, QImage)
+    Note over V: canvas: source.frame(i) on the GUI thread if cheap (cached / next frame),<br/>else PreviewService renders the plain frame on the pool;<br/>with Preview edits on, PreviewService renders<br/>crop + resize on the pool → frameReady(i, QImage)
     WK-->>V: QImage → QPixmap (GUI thread) → paint
 
     U->>MW: Generate
@@ -168,13 +180,39 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 
 | Thread | Does | Must not |
 |---|---|---|
-| GUI thread | all widgets, `Document`, undo stack, `QPixmap` creation, painting, `summarize()` (cheap), the canvas's `source.frame(i)` (a cache hit for typical GIFs), Save frame's `export_frame_png` (one frame) | block more than about 16 ms: no `GifSource.open`, no `generate`, no bulk decoding |
-| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open` (main window), `thumbnail()` batches + `pil_to_qimage` (filmstrip), `generate` (main window), preview frames (`frame` + `render_frame` + `pil_to_qimage`) and `estimate_size` (`PreviewService`) | touch widgets or `Document`, create `QPixmap` |
+| GUI thread | all widgets, `Document`, undo stack, `QPixmap` creation, painting, `summarize()` (cheap), the canvas's `source.frame(i)` **only when cheap** (`frames_to_decode(i) × pixels ≤ 4,000,000`, about 25 ms), Save frame's `export_frame_png` (one frame) | block more than about 16 ms: no `GifSource.open`, no `generate`, no bulk or expensive decoding, never wait on the decoder lock |
+| Pool threads (`QThreadPool.globalInstance()` via `run_async`) | `GifSource.open` (main window), `thumbnail()` batches + `pil_to_qimage` (filmstrip), `generate` (main window), preview frames (`frame` + `render_frame` + `pil_to_qimage`), expensive plain source frames for the canvas, and `estimate_size` (`PreviewService`) | touch widgets or `Document`, create `QPixmap` |
 
+### How `run_async` works (M4 model)
+```mermaid
+sequenceDiagram
+    participant G as GUI thread
+    participant R as _Relay (QObject on GUI thread)
+    participant P as pool thread
+    G->>R: create relay + Event "exited"; keep relay in _live
+    G->>P: QThreadPool.start(plain callable)
+    P->>P: fn() / fn(progress)
+    P-->>R: finished / failed / progress (queued signals)
+    P->>P: finally: exited.set()
+    R->>G: on_done / on_error / on_progress
+    G->>G: _release: exited? → drop relay, deleteLater()<br/>not yet → QTimer.singleShot(1, _release)
+```
 - `run_async(fn, *, on_done, on_error, on_progress, pool=None)` creates a `_Relay` QObject **on the calling (GUI) thread**. The worker emits its signals, and Qt queues them back to the GUI thread. Call it only from the GUI thread.
-- `GifSource` is **thread-safe**: one lock per source guards decoding and the cache. `frame()` returns copies. Concurrent requests on one source are serialised, not parallel.
+- **Jobs are plain callables**, handed to `QThreadPool.start(callable)`. There is no Python `QRunnable` subclass: with one, Qt calls a Python-overridden `run()` on a C++-owned object from a pool thread, and PySide must manage that wrapper across threads. Rule (AGENTS.md): never subclass `QRunnable` in Python; use `run_async`.
+- **Relay lifetime:** the relay is deleted only after the worker has **left** `emit()` (the `exited` event). Deleting a QObject while another thread is inside one of its emits is undefined behaviour, and the GUI thread can otherwise run the callback before the worker's `emit()` has returned.
+- An error is passed to `on_error`; a traceback is printed only when there is **no** `on_error` (handled errors stay quiet).
+- **Exit:** `app.main` waits `QThreadPool.globalInstance().waitForDone(10_000)` after `app.exec()`, so interpreter teardown never runs under a live pool thread. The main window cancels a running Generate on close and closes itself once the worker reports back.
+- **Tests:** the autouse `_drain_workers` fixture (`tests/ui/conftest.py`) waits for the pool and processes events after every UI test, before pytest-qt deletes the widgets, so no task from one test runs into the next.
+
+These three changes (callables, relay lifetime, drain fixture) followed one segmentation fault and one deadlock in about 20 full test runs during M4. Their root cause is **not confirmed** (120,000-task probes reproduced neither); see the [dev log](04-development-log.md#stability-one-crash-and-one-hang-in-the-test-suite-c4b9329-9ab961f).
+
+### Decoder locking and the canvas
+- `GifSource` is **thread-safe**: one lock per source guards decoding and the cache, held for a whole render. `frame()` returns copies. Concurrent requests on one source are serialised, not parallel.
+- So the GUI thread must never call `frame(i)` when that could wait for, or do, a long render. The canvas first asks `source.frames_to_decode(i)`, which **never blocks**: it answers from the cache state, or returns `GifSource.BUSY` (a huge number) if another thread holds the lock. If `cost × W × H > SYNC_DECODE_PIXELS` the canvas calls `PreviewService.request_frame(i)` instead (geometry off → the plain source frame; one render at a time, latest request wins) and keeps the previous frame up until `frameReady(i, QImage)` arrives. This took the worst scrub stall on a 1080p×200 GIF from 384 ms to 28 ms ([canvas page](codebase/src/gif_editor/ui/inspector/canvas.md#async-source-frames-m4)).
+
+### Cancellation and stale results
 - **Cancellation** is cooperative: pass a `threading.Event` to `generate(..., cancel=ev)`. The encoder checks it between frames and before committing, and raises `encoder.Cancelled`, which arrives as `on_error`.
-- Results come back in completion order. Widgets must ignore stale results (e.g. a thumbnail for a frame no longer needed, or a source that has since been closed). `PreviewService` uses a generation counter per work stream, and its render worker receives the crop/size **captured at request time** as arguments: reading the live state on the pool thread would let an edit made mid-render leak into an image labelled with the old request (fixed in `e904982`).
+- Results come back in completion order. Widgets must ignore stale results (e.g. a thumbnail for a frame no longer needed, a source frame for an index that is no longer current, or a source that has since been closed). `PreviewService` uses a generation counter per work stream, and its render worker receives the crop/size **captured at request time** as arguments: reading the live state on the pool thread would let an edit made mid-render leak into an image labelled with the old request (fixed in `e904982`).
 
 ## 6. Where each plan decision is implemented
 
@@ -210,13 +248,14 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 
 | Situation | Behaviour | Where |
 |---|---|---|
-| Missing file, not a GIF, unreadable | `GifLoadError` with a user-presentable message | `GifSource.open`, `_read_header` |
-| Canvas > 2 × `Image.MAX_IMAGE_PIXELS` (≈ 179 Mpx) or side > 8192 | `GifLoadError` | `_parse` |
-| Any frame side > 8192, area > 2 × MAX_IMAGE_PIXELS, or area > max(4 × canvas, 16 Mpx) | `GifLoadError` for the whole file (decompression-bomb guard) | `_check_frame_size` |
-| More than 10 000 frames | `GifLoadError` | `_parse` |
+| Missing file, folder, unreadable, empty, not a GIF | `GifLoadError` with `kind` `NOT_FOUND` / `IS_DIRECTORY` / `UNREADABLE` / `EMPTY` / `NOT_GIF` | `GifSource.open`, `_read_header` |
+| Canvas > 2 × `Image.MAX_IMAGE_PIXELS` (≈ 179 Mpx) or side > 8192 | `GifLoadError(kind=TOO_LARGE, width, height, max_side)` | `_parse` |
+| Any frame side > 8192, area > 2 × MAX_IMAGE_PIXELS, or area > max(4 × canvas, 16 Mpx) | `GifLoadError` (`MALFORMED`) for the whole file (decompression-bomb guard) | `_check_frame_size` |
+| More than 10 000 frames | `GifLoadError(kind=TOO_MANY_FRAMES, max_frames)` | `_parse` |
 | Truncated mid-frame / junk after frames / no trailer | load what is complete, add to `GifSource.warnings` | `_parse` |
 | Short/corrupt LZW in a complete frame | keep the decoded pixels, warning | `_decode_indices` |
-| Frame data undecodable during load | frame 0 → `GifLoadError`; later → stop there, warning | `GifSource._index` |
+| Frame data undecodable during load | frame 0 → `GifLoadError` (`MALFORMED`); later → stop there, warning | `GifSource._index` |
+| A file opened with warnings (partly loaded) | Information dialog "“x.gif” is damaged; N frames could be loaded.", warnings as details | `MainWindow.open_file` → `explain_load_warnings` |
 | Cache memory | ≤ `cache_budget_bytes` (512 MiB default), checkpoints ≤ ¼ of it | `_FrameCache` |
 | Invalid edit values | `ValueError` from `EditState.with_` / `validate`; `Document.apply` pushes nothing | `models.py`, `document.py` |
 | Delete every frame | `ValueError` from `Document.delete_frames` | `document.py` |
@@ -225,13 +264,28 @@ See the [Document page](codebase/src/gif_editor/ui/document.md) for the sequence
 | Cancel | `encoder.Cancelled`; temp file deleted; destination untouched | `write_gif` |
 | Any error during writing | temp file deleted, exception re-raised, destination untouched | `write_gif` |
 | Output doesn't read back as planned | `RuntimeError("written GIF failed verification…")`, destination untouched | `pipeline._verifier` |
-| Pillow internals changed | `SelfTestError` → "Startup self-test failed" dialog, exit code 1, before any window | `core/selftest.py`, `app.main` |
-| Worker exception | `on_error(message, exc)` on the GUI thread + traceback on stderr | `ui/workers.py` |
-| Open fails (any exception) | non-blocking "Open failed" box + `last_error`; the previous document stays open | `MainWindow.open_file` |
-| Generate fails / cancelled | "Generate failed" box, or a status-bar "cancelled" message; destination untouched | `MainWindow.generate_to` |
+| Pillow internals changed | `SelfTestError` → "GIF Editor can't start because one of its components is not working… Download it again" dialog (details: the self-test message), exit code 1, before any window | `core/selftest.py`, `app.main` |
+| Worker exception | `on_error(message, exc)` on the GUI thread; traceback on stderr only if there is no `on_error` | `ui/workers.py` |
+| Open fails (any exception) | non-blocking "Can't open file" dialog with a plain headline per `kind` (or `MemoryError` / unknown), technical text behind Show Details; `last_error`; the previous document stays open | `MainWindow.open_file` → `explain_load_error` |
+| Generate fails / cancelled | "Generate failed" dialog with a plain headline per `errno` / Windows `winerror` 32/33 ("open in another program") / `MemoryError`, always "Nothing was written; any existing file with that name is unchanged."; or a status-bar "cancelled" message | `MainWindow.generate_to` → `explain_generate_error` |
+| Save frame fails | `OSError` → the same explanation with title "Save failed"; `ValueError` → a short "Could not save the frame" box | `MainWindow.save_frame_to` |
+| Window closed during Generate | Generate is cancelled; the window closes by itself when the worker reports back | `MainWindow.closeEvent`, `_close_when_idle` |
 | Edit refused by a widget (delete all, trim end before start, invalid crop) | `Filmstrip.errorOccurred` / `show_error`; the settings panel shows its own and the crop panel's (`CropPanel.errorOccurred`) in its summary card; `CropItem` silently re-syncs from the document | `filmstrip.py`, `settings_panel.py`, `crop_panel.py`, `crop_item.py`, `main_window.py` |
 | Size estimate fails or the state is invalid | no Size line (never an error dialog) | `PreviewService._estimate_job`, `_start_estimate` |
 | Preview frame render fails | `PreviewService.frameFailed(i, message)`; the canvas keeps the previous image | `preview.py` |
+
+### The error-explanation flow (M4)
+```mermaid
+flowchart LR
+    A["core raises<br/>GifLoadError(message, kind, **info)<br/>OSError (errno, winerror) · MemoryError · other"] --> B["run_async → on_error(msg, exc)<br/>on the GUI thread"]
+    B --> C["ui/messages.explain_*(exc, path)<br/>→ Explanation(title, headline, body, details)"]
+    C --> D["MainWindow.show_explanation(expl, icon)<br/>QMessageBox.open(): headline · informative text ·<br/>Show Details… = str(exc)"]
+    D --> E["last_error = headline + body<br/>last_dialog = the box<br/>status bar = headline (8 s)"]
+```
+- The core never writes user-facing prose; it says **why** (`kind`) and gives the numbers (`info`). Its message text stays precise and technical, is matched by tests, and ends up in Details.
+- `ui/messages.py` is pure Python, so every wording branch is unit-tested (`tests/ui/test_messages.py`), including a check that no jargon reaches the headline or body.
+- `show_error(message, title)` remains for short widget refusals ("Cannot delete every frame"); it builds an `Explanation` with no body or details and goes through the same `show_explanation`.
+- Dialogs are opened with `open()` (non-blocking), so the headless tests never hang; tests assert on `last_error` and `last_dialog`.
 
 ## 8. Extension points: adding a new edit type end to end
 
@@ -257,7 +311,8 @@ Example: a hypothetical *Reverse* toggle (play frames backwards). The same steps
 flowchart TB
     MW["MainWindow (QMainWindow)<br/>owns Document, Player, PreviewService, CropItem<br/>actions · Crop menu · dialogs"]
     SP["QSplitter (horizontal)"]
-    SA["QScrollArea"]
+    SA["QScrollArea 'Output settings'"]
+    GEN["Generate button (pinned)"]
     SET["SettingsPanel"]
     CP["CropPanel (Crop group)"]
     INS["Inspector (QVBoxLayout)"]
@@ -271,6 +326,8 @@ flowchart TB
     PS[("PreviewService (QObject, no widget)")]
     MW --> SP
     SP --> SA --> SET --> CP
+    SP --> GEN
+    SET -. owns .-> GEN
     SP --> INS
     INS --> CV & TR & TB & FS
     CV --- SC
@@ -287,6 +344,7 @@ flowchart TB
 - The `Player` is not a widget. The window owns it because two things drive it: the transport buttons and the window's keyboard actions.
 - **`PreviewService` (M3) is a non-visual service owned by the main window.** It reads `Document` and feeds two widgets: the **canvas** (rendered output frames, via `canvas.set_preview(preview)` and `frameReady`) and the **settings panel** (the size estimate, via `SettingsPanel(doc, preview=preview)` and `estimated_bytes`). Neither widget owns or drives it; the window's P action does, through the `Player`. It lives in the window because it has two consumers, exactly like the `Player`.
 - **`CropItem` (M3) lives in the canvas scene**, where scene coordinates are source image pixels. The main window creates it and adds it with `canvas.scene().addItem(...)`; `FrameCanvas` has no crop code. The window also owns the crop tool action and decides visibility (hidden during "Preview edits").
+- **The Generate button is pinned below the scroll area (M4).** `SettingsPanel` creates and owns `generate_button` (and `generateRequested`); the main window removes it from the panel's layout and puts it in a left-column footer under the `QScrollArea`, so it stays visible when the settings column has to scroll (e.g. 1080p at 150 %). The window opens at 1300×820 at most, capped at 90 % of the screen's available area and centred (`_fit_to_screen`).
 - **`CropPanel` (M3) lives inside the settings panel** (`settings.crop_panel`, between Output size and Quality). The settings panel only forwards its `errorOccurred` into the summary card.
 - **`CropItem` and `CropPanel` never talk to each other.** Both write `doc.state.crop` through `Document.apply`, and both refresh from `stateChanged`. A canvas drag moves the spinboxes and a spinbox edit moves the rectangle only because both follow the document.
 - The window is the only code that reaches into widgets, and only to **wire** them: actions call widget methods (`filmstrip.delete_selected`, `canvas.zoom_fit`, `player.step`, `crop_item.nudge`), and outward signals come back (`SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred`, `FrameCanvas.zoomChanged`, `CropItem.cropActiveChanged`/`previewChanged`, `PreviewService.geometryChanged`). Widgets never call each other. Details: [main_window page](codebase/src/gif_editor/ui/main_window.md).
@@ -338,7 +396,7 @@ Edits go the same way: `doc.apply(...)` → `SetStateCommand` → `stateChanged(
 |---|---|---|---|---|
 | Settings panel | `ui/settings_panel.py` | `sourceChanged`, `stateChanged`; `PreviewService.estimateChanged/estimateReady`; `CropPanel.errorOccurred` | `apply(..., merge_key=<per control>)`, `set_trim(..., "trim")`, `summary()` | Live summary + Size line + warnings; Generate button disabled when the output is empty. A size equal to the base size is stored as `None` ("follow the crop"). |
 | Crop panel | `ui/crop_panel.py` | `sourceChanged`, `stateChanged` | `apply(state.with_(crop=…), …, "crop" \| None)` | Checkable group: unticked = no crop, inputs greyed ("tick to crop"); ticking a full-frame default makes an 80 % centred crop. |
-| Frame canvas | `ui/inspector/canvas.py` | `sourceChanged`, `currentIndexChanged`, `stateChanged`; `PreviewService.frameReady/geometryChanged` | none (read-only) | Scene coordinates = image pixels (output pixels in geometry mode). Ctrl+wheel zoom, middle-drag pan. |
+| Frame canvas | `ui/inspector/canvas.py` | `sourceChanged`, `currentIndexChanged`, `stateChanged`; `PreviewService.frameReady/geometryChanged` | none (read-only); asks `PreviewService.request_frame` for expensive source frames | Scene coordinates = image pixels (output pixels in geometry mode). Ctrl+wheel zoom, middle-drag and Space+drag pan; a Space tap emits `spaceTapped` (→ play/pause). |
 | Crop item | `ui/inspector/crop_item.py` | `sourceChanged`, `stateChanged` | `apply(state.with_(crop=…), …, "crop-drag-N" \| None)` | No document write mid-drag; edits only while the tool is on. |
 | Preview service | `ui/inspector/preview.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | none; reads `plan()` | Not a widget. Pool renders with captured geometry, LRU cache, debounced estimate. |
 | Transport | `ui/inspector/transport.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`; `Player.playingChanged`/`previewEditsChanged` | none (drives the `Player`) | Shortcuts live in the window; "Save frame…" just emits a signal. |
@@ -346,7 +404,7 @@ Edits go the same way: `doc.apply(...)` → `SetStateCommand` → `stateChanged(
 | Filmstrip | `ui/inspector/filmstrip.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged`, `selectionChanged` | `set_current_index`, `set_selection`, `delete_frames`, `restore_frames`, `set_trim(..., None)` | Thumbnails in batches of 32 via `run_async`, stale batches dropped by generation number. |
 | Player | `ui/inspector/player.py` | `sourceChanged`, `stateChanged`, `currentIndexChanged` | `set_current_index`; reads `plan()` in preview mode | Ideal-timeline scheduling (no drift), skips late frames, rebases after a stall longer than one loop. |
 | Inspector | `ui/inspector/inspector.py` | — | — | Composition only. |
-| Main window | `ui/main_window.py` | `sourceChanged`; `CropItem.cropActiveChanged/previewChanged`; `PreviewService.geometryChanged`; `Player.previewEditsChanged` | `set_source`, `close`, `set_trim(..., None)`, `plan()`, `undo_stack` | Async open + drag-drop, Generate with progress/cancel, Save frame, busy flags, crop tool rules. |
+| Main window | `ui/main_window.py` | `sourceChanged`; `CropItem.cropActiveChanged/previewChanged`; `PreviewService.geometryChanged`; `Player.previewEditsChanged`; `FrameCanvas.spaceTapped` | `set_source`, `close`, `set_trim(..., None)`, `plan()`, `undo_stack` | Async open + drag-drop, Generate with progress/cancel, Save frame, busy flags, crop tool rules, plain-language dialogs (`show_explanation`), fits the screen. |
 
 Shared widget rules (AGENTS.md):
 - construct with `(doc, parent=None)` (the transport and inspector also take the `player`; the settings panel optionally `preview=`);
@@ -354,14 +412,20 @@ Shared widget rules (AGENTS.md):
 - show a disabled/empty state when `doc.is_open` is False;
 - never block the GUI thread for more than about 16 ms;
 - use `merge_key` for continuous gestures (per-gesture keys, table above);
-- `setAccessibleName` on custom widgets;
+- `setAccessibleName` on custom widgets **and containers** (M4 audit); inputs with a limited range explain it in a tooltip + accessible description;
 - HiDPI-safe painting (cosmetic pens, logical pixels).
 
-### Known UI limitations (after M3)
-- **Space** is the window's play/pause shortcut, so the canvas's Space+drag pan never sees the key; **middle-drag** pans.
+### Known UI limitations (after M4)
+- **Small screens:** the filmstrip has a fixed height of 140 px. On the smallest supported logical screen (1366×768 at 150 % = 911×512) the window fits, but the canvas gets only about 184 px of height.
+- **Space** is claimed by the canvas only while the canvas has focus and a file is open; elsewhere it is the window's play/pause shortcut. (Fixed in M4: Space+drag pans; a tap still plays.)
 - Window-level arrow and Home/End shortcuts are skipped when the focused widget accepts `ShortcutOverride` for them (the settings and crop panels' spin boxes; the filmstrip claims Delete/Backspace/Insert and handles them itself).
 - **Crop actions follow the rectangle.** The Ctrl+arrow nudge/resize actions are enabled only while the crop rectangle is visible (tool on, not previewing). "Remove crop" works whenever a crop exists, whether or not the rectangle is shown. (Fixed after the M3 docs pass; see the dev log.)
 - In geometry preview the crop cannot be edited on the canvas (the rectangle is hidden, because the shown image is already cropped).
+
+### Known limitations outside the UI (after M4)
+- The size estimate can be low (0.67×) on long GIFs whose middle is unrepresentative.
+- The cause of one crash and one hang seen in M4 test runs is unconfirmed; three plausible causes were removed (§5) and a soak run checks the result.
+- Messages are English only.
 
 ## Known drift between docs and code
 

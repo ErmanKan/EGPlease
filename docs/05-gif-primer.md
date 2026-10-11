@@ -38,7 +38,7 @@ repeat:
 There is **no frame count** in the header and no index of frames. To know anything about frame 50 you must walk every block before it. Sub-block length bytes make that walk cheap, because image data can be skipped without decompressing it.
 
 **In our code:**
-- Parsing: `decoder._parse` and `_skip_sub_blocks` ([page](codebase/src/gif_editor/core/decoder.md#step-1-read-and-parse-open--_parse-l215-330)). Image data is only *located*, not decoded.
+- Parsing: `decoder._parse` and `_skip_sub_blocks` ([page](codebase/src/gif_editor/core/decoder.md#step-1-read-and-parse-open--_parse-l240-370)). Image data is only *located*, not decoded.
 - Writing the container: `encoder._write_header` and `_Writer.finish`; per-frame GCE + descriptor + data come from Pillow's `GifImagePlugin.getdata` ([page](codebase/src/gif_editor/core/encoder.md)).
 - Test writer: `tests/corpus.py::encode_gif` writes every block by hand ([page](codebase/tests/corpus.md)).
 
@@ -53,7 +53,7 @@ Image data is the frame's palette indices (row by row) compressed with a variant
 Short or corrupt streams are common in the wild. Browsers show the pixels that decoded and leave the rest of the rectangle unchanged.
 
 **In our code:**
-- Decoding uses Pillow's C decoder through `Image.Image.frombytes(data, "gif", bits, interlace, -1)` in `decoder._decode_indices`. Short data keeps the decoded prefix (located with the 0/255 double-decode trick; see the [decoder page](codebase/src/gif_editor/core/decoder.md#step-2-decode-one-frames-indices-_decode_indices-l356-398)). The minimum code size is validated to 1..12.
+- Decoding uses Pillow's C decoder through `Image.Image.frombytes(data, "gif", bits, interlace, -1)` in `decoder._decode_indices`. Short data keeps the decoded prefix (located with the 0/255 double-decode trick; see the [decoder page](codebase/src/gif_editor/core/decoder.md#step-2-decode-one-frames-indices-_decode_indices-l393-435)). The minimum code size is validated to 1..12.
 - Encoding uses Pillow's encoder inside `GifImagePlugin.getdata` (`encoder._write_frame`).
 - Tests: `tests/corpus.py::lzw_encode` emits only literal codes at a fixed width with frequent Clears. That is valid but uncompressed, and obviously correct.
 - `core/selftest.py` checks that both Pillow internals still work.

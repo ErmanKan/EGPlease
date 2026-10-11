@@ -18,7 +18,7 @@
 | `test_estimate_never_writes_files` | test | The directory listing is unchanged after an estimate: it encodes in memory only. |
 | `test_write_stream_writes_to_a_buffer` | test | `write_stream` into a `BytesIO` returns the frame count (3); the bytes, saved and read back, are 3 frames of 100 ms; zero frames raise `ValueError`. |
 
-6 collected cases.
+7 collected cases (6 functions, one parametrized twice).
 
 ## How it works
 Each test builds its GIF in `tmp_path` with `make_gif` (AGENTS.md: no binary fixtures in the repo), opens it with `GifSource.open` in a `with` block, and calls `estimate_size(source, state, plan(source.meta, state))`, which is exactly how `PreviewService` calls it.

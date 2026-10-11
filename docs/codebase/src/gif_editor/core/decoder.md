@@ -10,17 +10,19 @@
 ## Public API
 | Name | Kind | Purpose |
 |---|---|---|
-| `Limits(max_canvas_side=8192, max_frames=10_000, cache_budget_bytes=512 MiB, keyframe_interval=32)` | frozen dataclass | Safety and memory limits passed to `GifSource.open` (L84-89). |
-| `FrameMeta(index, delay_ms, effective_delay_ms, disposal)` | frozen dataclass | Per-frame metadata. `delay_ms` is the raw file value (0 when there is no GCE); `effective_delay_ms` applies the browser rule 0/10 ms → 100 ms (L92-97). |
-| `SourceMeta(path, width, height, frame_count, loop, frames, has_transparency)` | frozen dataclass | Whole-file metadata (L100-116). `loop` is the NETSCAPE loop count or `None` when there is no loop block. |
+| `Limits(max_canvas_side=8192, max_frames=10_000, cache_budget_bytes=512 MiB, keyframe_interval=32)` | frozen dataclass | Safety and memory limits passed to `GifSource.open` (L86-92). |
+| `FrameMeta(index, delay_ms, effective_delay_ms, disposal)` | frozen dataclass | Per-frame metadata. `delay_ms` is the raw file value (0 when there is no GCE); `effective_delay_ms` applies the browser rule 0/10 ms → 100 ms (L94-100). |
+| `SourceMeta(path, width, height, frame_count, loop, frames, has_transparency)` | frozen dataclass | Whole-file metadata (L102-118). `loop` is the NETSCAPE loop count or `None` when there is no loop block. |
 | `SourceMeta.total_duration_ms` | property | Sum of effective delays. |
 | `SourceMeta.delays_ms` | property | Tuple of effective delays; this is what `timeline.plan_output` consumes. |
-| `GifLoadError` | exception | The file cannot be loaded (missing, not a GIF, too large, no decodable frame…). Message is user-presentable. |
-| `GifSource.open(path, limits=Limits())` | classmethod | Read the whole file, parse it, composite every frame once, return a `GifSource` (L552-563). Slow for big files: call off the GUI thread. |
+| `GifLoadError(message, kind=MALFORMED, **info)` | exception | The file cannot be loaded (missing, a folder, unreadable, empty, not a GIF, too large, too many frames, damaged). `str(err)` is a precise technical message; `.kind` says why (one of the class constants below); `.info` holds the numbers an explanation needs. See [below](#gifloaderror-kind-and-info). |
+| `GifSource.open(path, limits=Limits())` | classmethod | Read the whole file, parse it, composite every frame once, return a `GifSource` (L589-602). Slow for big files: call off the GUI thread. |
 | `GifSource.meta` | property | The `SourceMeta`. |
 | `GifSource.warnings` | attribute (`list[str]`) | Non-fatal problems found while loading (truncation, corrupt LZW, junk after the last frame, missing trailer). |
-| `GifSource.frame(i)` | method | Composited RGBA frame `i` at canvas size. Returns a **copy** the caller may mutate (L614-621). `IndexError` if out of range, `ValueError` after `close()`. |
-| `GifSource.thumbnail(i, max_side=96)` | method | RGBA thumbnail that fits in `max_side` (never upscaled), cached per `(i, max_side)` (L672-688). |
+| `GifSource.frame(i)` | method | Composited RGBA frame `i` at canvas size. Returns a **copy** the caller may mutate (L653-660). `IndexError` if out of range, `ValueError` after `close()`. |
+| `GifSource.frames_to_decode(i) -> int` | method (M4) | How many frames `frame(i)` would composite **right now**: 0 if cached, 1 for the next frame after the last one drawn, more for a jump. **Never blocks:** returns `GifSource.BUSY` if another thread holds the decoder lock (L665-694). See [below](#frames_to_decode-and-busy). |
+| `GifSource.BUSY` | class constant (M4) | `1 << 30`: the "another thread is decoding" answer of `frames_to_decode`, chosen so large that any cost threshold says "too expensive, go asynchronous". |
+| `GifSource.thumbnail(i, max_side=96)` | method | RGBA thumbnail that fits in `max_side` (never upscaled), cached per `(i, max_side)` (L745-762). |
 | `GifSource.close()` / context manager | method | Drops the file bytes and all caches. Idempotent. |
 
 ## How it works
@@ -30,8 +32,8 @@ Pillow 12.x can decode GIFs and composite frames when you `seek()`, but its comp
 
 The second reason is random access. Pillow's GIF reader only seeks forward and recomposites from frame 0 when you go backwards. Scrubbing a timeline needs fast backward seeks, so we keep our own canvas checkpoints.
 
-### Step 1: read and parse (`open` → `_parse`, L215-330)
-1. `open` reads the **whole file into memory** and closes it straight away. No file handle stays open, so on Windows the user can overwrite or delete the source while it is loaded (`test_source_file_released_after_open`). Later changes on disk are ignored.
+### Step 1: read and parse (`open` → `_parse`, L240-370)
+1. `open` first refuses a folder (`IS_DIRECTORY`) and a missing path (`NOT_FOUND`); an `OSError` while reading becomes `UNREADABLE`. It then reads the **whole file into memory** and closes it straight away. No file handle stays open, so on Windows the user can overwrite or delete the source while it is loaded (`test_source_file_released_after_open`). Later changes on disk are ignored.
 2. `_read_header` checks the `GIF87a`/`GIF89a` signature and reads the logical screen size and flags.
 3. Canvas guards: size must be > 0, `w*h ≤ 2 * Image.MAX_IMAGE_PIXELS` (Pillow's decompression-bomb threshold, about 179 Mpx by default), and each side must be ≤ `max_canvas_side`.
 4. The global colour table, if present, becomes a `(256, 4)` RGBA lookup table (`_make_lut`). Missing entries stay opaque black, which is why an index beyond the table decodes as opaque black (`test_no_global_palette_and_out_of_table_index`).
@@ -44,13 +46,13 @@ The second reason is random access. Pillow's GIF reader only seeks forward and r
 
 The parser is pure Python but cheap: it only touches header bytes and sub-block length bytes.
 
-### Step 2: decode one frame's indices (`_decode_indices`, L356-398)
+### Step 2: decode one frame's indices (`_decode_indices`, L393-435)
 - Only the part of the frame that lies on the canvas is needed (`vis_w × vis_h`). A frame entirely off the canvas is not decoded at all: it still counts as a frame with its delay and disposal, but even corrupt LZW data in it is ignored (`test_off_canvas_frame_is_not_decoded`).
 - For a **non-interlaced** frame the target image has only `vis_h` rows. Pillow's decoder stops cleanly once the image is full, so rows below the canvas are never decoded. An **interlaced** frame stores rows out of order (see [the primer](../../../../05-gif-primer.md#interlacing)), so all `f.height` rows are decoded and then cropped. The per-frame size cap bounds that cost.
 - The actual decoding is `im.frombytes(blob, "gif", bits, interlace, -1)` on a `"P"` image. These are the same decoder arguments that Pillow's own `GifImagePlugin` builds for its tile. This is an undocumented internal, which is why `core/selftest.py` exists.
 - **Short or corrupt LZW data:** Pillow raises `ValueError` but has written a prefix of the pixels in decode order. Browsers show those pixels, so we do too. To find how many pixels were written without a second frame-sized buffer, the image is decoded into a buffer filled with 0 and scanned from the end for the last non-0 pixel (`_written_end`). The scan is then repeated after re-decoding into a buffer filled with 255, because the last real pixel might itself be 0. The larger of the two positions is the count `n`. A rank array maps each visible pixel to its decode position, and `written = position < n` becomes a boolean mask. `test_short_lzw_partially_off_canvas` exercises this for both interlaced and non-interlaced frames.
 
-### Step 3: composite (`_Compositor`, L401-451)
+### Step 3: composite (`_Compositor`, L438-488)
 The canvas is an `(H, W, 4)` uint8 numpy array that starts **fully transparent** (zeros).
 - `draw` clips the frame rectangle to the canvas. If disposal is 3 it saves a copy of the region first. It then maps indices to colours through the frame's LUT. The LUT is viewed as `uint32`, so each pixel is one 32-bit gather (about 5× faster than gathering 4-byte rows). Pixels equal to the transparent index, and pixels not written by short data, are masked out; the rest are copied into the canvas.
 - `dispose` runs **after** the frame has been captured as an output image: disposal 2 sets the rectangle to `0` (transparent), disposal 3 restores the saved region, and 0, 1 and the undefined 4-7 leave it as is.
@@ -67,7 +69,7 @@ flowchart LR
     K & C & R --> N[canvas before frame i+1]
 ```
 
-### Step 4: index pass (`_index`, L565-603)
+### Step 4: index pass (`_index`, L604-643)
 `open` composites **every** frame once, eagerly:
 - This validates the data: a frame whose LZW stream raises a decode error ends the load there with a warning. If it is frame 0, the result is `GifLoadError`.
 - It computes `has_transparency`: does any composited frame have any pixel with alpha < 255? Note that this includes canvas areas never painted (for example a first frame smaller than the canvas).
@@ -75,13 +77,13 @@ flowchart LR
 
 Cost: the docstring cites about 1.2 s for 150 frames of 1280×720 on a dev machine. `test_open_performance_500x500x200` bounds a 500×500×200 file at < 6 s (measured about 0.3 s).
 
-### Step 5: the cache (`_FrameCache`, L461-524)
+### Step 5: the cache (`_FrameCache`, L498-564)
 Every cached item is a full canvas, so its cost is `frame_bytes = w*h*4`.
 - **LRU** of composited RGBA images (`OrderedDict`), evicted oldest-first while `used_bytes > budget`.
 - **Checkpoints:** for every `keyframe_interval`-th frame, the canvas *before* that frame is drawn. Checkpoints are pinned (never evicted by the LRU) and limited to **a quarter of the budget** (`pin_budget`). When the next checkpoint would not fit, the interval is **doubled** and every checkpoint not on the new grid is dropped. Checkpoints therefore stay spread across the whole animation instead of crowding the start (`test_checkpoints_spread_when_budget_is_small`). If a single frame is bigger than `pin_budget`, there are no checkpoints at all.
 - `put` refuses an image when the checkpoints leave no room for it. This keeps `used_bytes ≤ budget` as an invariant, which several tests assert after every access.
 
-### Step 6: cache miss (`frame` → `_render` → `_resume_point`, L614-670)
+### Step 6: cache miss (`frame` → `_render` → `_resume_point`, L653-743)
 To render frame `i` we need the canvas state just before it. `_resume_point` picks the latest known state at or before `i`:
 1. the nearest checkpoint `k ≤ i`;
 2. or, if later, `_last` (the canvas left by the previous render) when `_last.index < i`; this makes forward playback O(1) per frame;
@@ -101,16 +103,48 @@ flowchart TD
     LOOP --> PUT[cache frame i, _last = i] --> CPY
 ```
 
+### `GifLoadError`: kind and info
+Added in M4 (`d3f0297`; used from `95b4f03`) so the UI can explain a failure in plain words **without parsing the message text** ([`ui/messages.py`](../ui/messages.md)). The message text was left unchanged, so the tests that match it still pass and it is still shown as the technical details.
+
+| `kind` constant | Raised when | `info` |
+|---|---|---|
+| `NOT_FOUND` (`"not_found"`) | `open`: the path does not exist (or is not a regular file) | — |
+| `IS_DIRECTORY` | `open`: the path is a folder (checked before `NOT_FOUND`) | — |
+| `UNREADABLE` | `open`: an `OSError` while reading (permissions, locked, disk error); chained with `from e` | — |
+| `EMPTY` | `_read_header`: the file has 0 bytes | — |
+| `NOT_GIF` | `_read_header`: no `GIF87a`/`GIF89a` signature (some other format, or junk, or 1–5 bytes) | — |
+| `TOO_LARGE` | `_parse`: canvas area > 2 × `Image.MAX_IMAGE_PIXELS`, or a canvas side > `max_canvas_side` | `width`, `height`, `max_side` |
+| `TOO_MANY_FRAMES` | `_parse`: more than `max_frames` image descriptors | `max_frames` |
+| `MALFORMED` (the default) | everything else: header or colour table truncated, invalid (0) canvas size, no frames, frame 0 undecodable, **an oversized frame descriptor** (`_check_frame_size`, the decompression-bomb guard), a decode error in `_render` | — |
+
+Note that an oversized *frame* inside a normal-sized canvas is `MALFORMED`, not `TOO_LARGE`: such a file is broken or malicious, and "is damaged" is the right thing to tell the user.
+
+### `frames_to_decode` and `BUSY`
+Added in M4 (`5c40830`) for the canvas. Showing a frame on the GUI thread is fine when it is cached or the next one in sequence, but scrubbing **backwards** through a GIF bigger than the cache can mean re-compositing 30+ large frames from a checkpoint: measured at up to **384 ms** per step on a 1920×1080×200 GIF ([stress probe](../../../scripts/stress_probe.md)). The canvas needs to know the cost **before** it calls `frame(i)`, so it can send expensive frames to a background render instead ([canvas page](../ui/inspector/canvas.md#async-source-frames-m4)).
+
+`frames_to_decode(i)` mirrors `_resume_point` without copying any canvas:
+1. `_check_index(i)` (so `IndexError` for a bad index).
+2. Try to take the lock **without waiting** (`acquire(blocking=False)`). If another thread holds it, return `BUSY` at once.
+3. If `i` is in the LRU: 0.
+4. `start` = the nearest checkpoint ≤ `i` (or 0); if `_last` lies in `[start, i)`, `start = _last + 1` (forward playback: the next frame costs 1).
+5. Scanning back from `i-1` to `start`, a cached frame `j` whose disposal is not 3 means only `i - j` frames are needed.
+6. Otherwise `i - start + 1`.
+
+*Why it must never block:* the first version waited for the lock like `frame()` does. But the decoder holds the lock for a whole render, and the render it waits for is usually exactly the background render the canvas just requested. The stress probe then still measured a **643 ms** stall. With the non-blocking answer, "someone else is decoding" counts as "expensive", the canvas goes asynchronous, and the worst stall dropped to **28 ms**.
+
+The answer is a snapshot: the cache may change right after the call. That is fine for a "fast enough for the GUI thread?" decision.
+
 ### Thumbnails
 `thumbnail` scales by `min(1, max_side / max(w, h))` with LANCZOS and caches per `(i, max_side)`. The thumbnail cache is **not** budgeted, but thumbnails are tiny (96 px ≈ 36 KiB each). The resize runs outside the lock, so two threads may compute the same thumbnail; that is harmless.
 
 ## Invariants & gotchas
-- **Limits / DoS.** Every image descriptor is checked while parsing (`_check_frame_size`, L194-212): side ≤ `max_canvas_side`, area ≤ `2 * MAX_IMAGE_PIXELS`, and area ≤ `max(4 * canvas area, 16 Mpx)`. Any violation, even after good frames, rejects the **whole** file. Before this fix a 40-byte file could make the decoder allocate about 1.25 GB (dev log, review finding 3, `5a464d8`). `test_descriptor_bomb_peak_rss_in_subprocess` measures real RSS because Pillow's C allocations are invisible to `tracemalloc`.
+- **Limits / DoS.** Every image descriptor is checked while parsing (`_check_frame_size`, L219-237): side ≤ `max_canvas_side`, area ≤ `2 * MAX_IMAGE_PIXELS`, and area ≤ `max(4 * canvas area, 16 Mpx)`. Any violation, even after good frames, rejects the **whole** file. Before this fix a 40-byte file could make the decoder allocate about 1.25 GB (dev log, review finding 3, `5a464d8`). `test_descriptor_bomb_peak_rss_in_subprocess` measures real RSS because Pillow's C allocations are invisible to `tracemalloc`.
 - The bomb guard follows `Image.MAX_IMAGE_PIXELS` at call time. Setting it to `None` disables that check, but the side and slack limits still apply.
 - **Thread safety:** all decoding and cache mutation happen under one `threading.Lock` per source. Concurrent `frame()` calls are therefore serialised, not parallel. `frame()` always returns a copy, so callers never share mutable images.
 - `_check_index` requires a real `int`. A `numpy.int64` raises `IndexError`; convert with `int()` first.
 - `frame()` after `close()` raises `ValueError("GifSource is closed")` on a cache miss. Cache hits are impossible after close because the caches are cleared.
 - `has_transparency` is "any composited pixel has alpha < 255", not "the file declares a transparency index". A file with a transparency index that never shows can be `False`; a first frame smaller than the canvas makes it `True`.
+- `frames_to_decode` is the only public method that does not wait for the lock; everything else (`frame`, `thumbnail`'s cache miss, `close`) does.
 - Decode errors that appear in `_render` (they should not happen, since `_index` already decoded every frame) are raised as `GifLoadError`.
 - `GifImagePlugin.LOADING_STRATEGY` is never touched (`test_loading_strategy_restored`).
 - The entry point is the **instance** method `Image.Image.frombytes(data, "gif", bits, interlace, -1)` on a pre-allocated `"P"` image (not the module-level `Image.frombytes`). The selftest test monkeypatches `Image.Image.frombytes` accordingly. (Until the end of M2 the module docstring wrongly named the module-level function; corrected.)
@@ -118,9 +152,13 @@ flowchart TD
 ## Tests
 - `tests/core/test_decoder.py`: metadata and effective delays, loop present/absent/count, disposal recording, colours vs Pillow on opaque full-canvas GIFs, copy semantics, index errors, thumbnails, not-a-GIF/garbage/missing file, frame and canvas limits, transparency detection, truncation, LRU correctness under a tiny budget and zero budget, 6-thread stress, file released after open, close semantics.
 - `tests/core/test_decoder_corpus.py`: every valid corpus entry matches the reference compositor (also scrubbing backwards with a tiny cache), the disposal-2 frames Pillow gets wrong, truncated/invalid/huge entries, a random 60-frame mix of every feature, checkpoint spreading, off-canvas and oversized frames, short LZW data, unknown blocks, GIF87a, descriptor bombs (time, `tracemalloc`, RSS), and open performance.
+- `tests/core/test_decoder.py` (M4): `frames_to_decode` follows the cache (0 when cached, 1 for the next frame, the full distance from frame 0 or the last frame drawn without a cache) and returns `BUSY` within 50 ms while another thread holds the lock.
+- `tests/ui/test_messages.py`: the `kind` (and `info`) of real refused files: not a GIF, empty, missing, folder, too large (header and `Limits`), too many frames, header only.
 - **Gaps:** no test for `ANIMEXTS1.0` loop blocks; no test of the thumbnail cache's memory growth; `_render`'s `GifLoadError` path is not reachable from tests.
 
 ## History
 - `f7a81ac`: first version, built on Pillow's seek and an LRU.
 - `212b23f`: rewrite with our own block parser and a numpy compositor with browser disposal semantics, plus keyframe checkpoints ([dev log, Wave 2](../../../../04-development-log.md#wave-2-decoder-rewrite-212b23f)).
 - `5a464d8`: per-frame descriptor limits; the file is read into memory and the handle released (review findings 3 and 6).
+- `d3f0297` (M4): `GifLoadError.kind`/`.info`; `95b4f03`: messages built on it ([dev log, Milestone 4](../../../../04-development-log.md#milestone-4-hardening)).
+- `5c40830` (M4): `frames_to_decode` and `BUSY`.
