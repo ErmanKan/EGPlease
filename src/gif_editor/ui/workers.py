@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal
 
 _live: set[_Relay] = set()  # keeps relays alive until their task reports back
 _lock = threading.Lock()
@@ -26,38 +26,40 @@ class _Relay(QObject):
     progress = Signal(int, object)  # (done, total | None)
 
 
-class _Runnable(QRunnable):
-    def __init__(
-        self,
-        fn: Callable[..., Any],
-        relay: _Relay,
-        with_progress: bool,
-        exited: threading.Event,
-    ) -> None:
-        super().__init__()
-        self._fn = fn
-        self._relay = relay
-        self._with_progress = with_progress
-        self._exited = exited
+def _job(
+    fn: Callable[..., Any], relay: _Relay, with_progress: bool, exited: threading.Event
+) -> Callable[[], None]:
+    """The function a pool thread runs: call ``fn``, report through ``relay``.
 
-    def run(self) -> None:  # executes on a pool thread
+    This is a plain function handed to ``QThreadPool.start(callable)``, not a Python
+    subclass of ``QRunnable``. With a subclass, Qt calls a Python-overridden ``run()`` on a
+    C++-owned object from a pool thread, and PySide must keep that object's Python wrapper
+    alive and dispatch the override across threads. In the test suite that combination
+    crashed once (segmentation fault in a pool thread) and hung once (deadlock between
+    garbage collection on the GUI thread and a pool thread entering ``run()``), each about
+    once in 20 full runs. A plain callable has no wrapper object to manage.
+    """
+
+    def run() -> None:  # executes on a pool thread
         try:
-            if self._with_progress:
-                result = self._fn(lambda done, total=None: self._relay.progress.emit(done, total))
+            if with_progress:
+                result = fn(lambda done, total=None: relay.progress.emit(done, total))
             else:
-                result = self._fn()
+                result = fn()
         except BaseException as exc:
             msg = str(exc) or type(exc).__name__
-            self._relay.failed.emit(msg, exc)
+            relay.failed.emit(msg, exc)
             traceback.print_exc()
         else:
-            self._relay.finished.emit(result)
+            relay.finished.emit(result)
         finally:
             # The GUI thread may run the callback (and want to delete the relay) before
             # emit() above has returned here. Deleting a QObject while another thread is
             # inside one of its emits is undefined behaviour, so the relay is only deleted
             # once this flag says the worker has let go of it (see ``_release``).
-            self._exited.set()
+            exited.set()
+
+    return run
 
 
 def run_async(
@@ -107,6 +109,4 @@ def run_async(
 
     relay.finished.connect(_done)
     relay.failed.connect(_fail)
-    (pool or QThreadPool.globalInstance()).start(
-        _Runnable(fn, relay, with_progress=on_progress is not None, exited=exited)
-    )
+    (pool or QThreadPool.globalInstance()).start(_job(fn, relay, on_progress is not None, exited))
