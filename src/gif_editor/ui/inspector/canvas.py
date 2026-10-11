@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QColor,
     QFocusEvent,
     QFont,
+    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -63,6 +64,7 @@ class FrameCanvas(QGraphicsView):
         self._space_held = False
         self._middle_panning = False
         self._checker = checkerboard_brush()
+        self._preview = None  # PreviewService, attached by the main window (optional)
 
         self._scene = QGraphicsScene(self)
         self._item = QGraphicsPixmapItem()
@@ -118,11 +120,34 @@ class FrameCanvas(QGraphicsView):
         """True when the current frame is deleted and the red overlay is drawn."""
         return self._doc.is_open and self._doc.current_index in self._doc.state.deleted
 
+    @property
+    def geometry_preview(self) -> bool:
+        """True while the canvas shows the cropped/resized OUTPUT frame instead of the source."""
+        return self._preview is not None and self._preview.geometry_enabled
+
+    def set_preview(self, preview: object) -> None:
+        """Attach a ``PreviewService``: while its geometry mode is on, show its frames.
+
+        In geometry mode the scene is the OUTPUT image (crop applied, then resized), so its
+        size can differ from the source canvas. Overlays that work in source pixels (the crop
+        rectangle) must hide themselves in this mode; the main window does that.
+        """
+        self._preview = preview
+        preview.frameReady.connect(self._on_preview_frame)
+        preview.geometryChanged.connect(self._on_geometry_changed)
+
     def image_rect(self) -> QRectF:
-        """Image bounds in scene (= image pixel) coordinates; empty if nothing is open."""
+        """Image bounds in scene (= image pixel) coordinates; empty if nothing is open.
+
+        Normally the source canvas. In geometry-preview mode it is the shown output frame.
+        """
         meta = self._doc.meta
         if meta is None:
             return QRectF()
+        if self.geometry_preview:
+            pm = self._item.pixmap()
+            if not pm.isNull():
+                return QRectF(0, 0, pm.width(), pm.height())
         return QRectF(0, 0, meta.width, meta.height)
 
     def map_to_image(self, view_pos: QPoint | QPointF) -> QPointF:
@@ -198,6 +223,30 @@ class FrameCanvas(QGraphicsView):
     def _on_state_changed(self, _state: object) -> None:
         self.viewport().update()  # deleted overlay may have changed
 
+    def _on_geometry_changed(self, _enabled: bool) -> None:
+        # Switching modes changes the scene size; the preview service sends the new frame
+        # itself (frameReady). Leaving geometry mode: show the source frame again now.
+        if not self.geometry_preview:
+            self._update_pixmap()
+            self._resize_scene()
+
+    def _on_preview_frame(self, index: int, image: QImage) -> None:
+        """A rendered output frame arrived. Show it if it is still the current one."""
+        if not self.geometry_preview or index != self._doc.current_index:
+            return
+        old = self._item.pixmap().size()
+        self._item.setPixmap(QPixmap.fromImage(image))  # GUI thread: QPixmap is safe here
+        if self._item.pixmap().size() != old:
+            self._resize_scene()
+        self.viewport().update()
+
+    def _resize_scene(self) -> None:
+        rect = self.image_rect()
+        self._scene.setSceneRect(rect if not rect.isEmpty() else QRectF(0, 0, 1, 1))
+        if self._fit_mode:
+            self.zoom_fit()
+        self.viewport().update()
+
     def _update_pixmap(self) -> None:
         source = self._doc.source
         if source is None:
@@ -206,6 +255,11 @@ class FrameCanvas(QGraphicsView):
         index = self._doc.current_index
         if not 0 <= index < source.meta.frame_count:
             self._item.setPixmap(QPixmap())
+            return
+        if self.geometry_preview:
+            # The preview service follows currentIndexChanged itself, renders off-thread and
+            # calls _on_preview_frame. Requesting here too would render every frame twice.
+            # Keep the old pixmap meanwhile (no flash of the uncropped frame).
             return
         # Synchronous on purpose: GifSource caches composited frames, so this is a
         # dictionary lookup + one RGBA conversion for typical GIFs. (M3/M4 may move

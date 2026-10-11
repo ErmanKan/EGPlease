@@ -34,6 +34,7 @@ from gif_editor.core.pipeline import GenerateResult, export_frame_png, generate
 from gif_editor.ui.document import Document
 from gif_editor.ui.inspector.inspector import Inspector
 from gif_editor.ui.inspector.player import Player
+from gif_editor.ui.inspector.preview import PreviewService
 from gif_editor.ui.settings_panel import SettingsPanel
 from gif_editor.ui.workers import run_async
 
@@ -57,6 +58,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.doc = doc or Document(self)
         self.player = Player(self.doc, self)
+        # Renders cropped/resized preview frames and keeps the output size estimate.
+        self.preview = PreviewService(self.doc, self)
         self.last_error: str | None = None
         self.last_result: GenerateResult | None = None
         self._loading = False
@@ -65,7 +68,7 @@ class MainWindow(QMainWindow):
         self._progress: QProgressDialog | None = None
 
         # ---- layout: settings (scrollable) | inspector
-        self.settings = SettingsPanel(self.doc)
+        self.settings = SettingsPanel(self.doc, preview=self.preview)
         scroll = QScrollArea()
         scroll.setWidget(self.settings)
         scroll.setWidgetResizable(True)
@@ -146,7 +149,10 @@ class MainWindow(QMainWindow):
         self.act_last = self._action("Last frame", self.player.go_last, "End")
         self.act_preview = QAction("Preview &edits", self, checkable=True)
         self.act_preview.setShortcut(QKeySequence("P"))
+        self.act_preview.setToolTip("Play the output timing and show the cropped/resized frame")
         self.act_preview.toggled.connect(self.player.set_preview_edits)
+        # "Preview edits" previews the whole output: timing (player) AND geometry (canvas).
+        self.player.previewEditsChanged.connect(self.preview.set_geometry_enabled)
         self.player.previewEditsChanged.connect(self.act_preview.setChecked)
         self.addAction(self.act_preview)
 
@@ -195,6 +201,7 @@ class MainWindow(QMainWindow):
         self.settings.generateRequested.connect(self.generate_dialog)
         self.inspector.transport.saveFrameRequested.connect(lambda: self.save_frame_dialog(False))
         self.inspector.filmstrip.errorOccurred.connect(self.show_error)
+        self.inspector.canvas.set_preview(self.preview)
         self.inspector.canvas.zoomChanged.connect(
             lambda z: self._zoom_label.setText(f"{z * 100:.0f}%")
         )

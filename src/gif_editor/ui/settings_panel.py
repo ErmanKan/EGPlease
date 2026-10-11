@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from gif_editor.core.models import MAX_FPS, MAX_SPEED, MIN_SPEED, EditState, OutputSize, Quality
+from gif_editor.ui.crop_panel import CropPanel
 from gif_editor.ui.document import Document
 
 #: Colour used for warnings in the summary card (amber, readable on light and dark).
@@ -62,6 +63,15 @@ def _fmt_seconds(ms: int) -> str:
     return f"{ms / 1000:.2f} s"
 
 
+def format_bytes(n: int) -> str:
+    """Human-readable size: '850 B', '12.4 KB', '3.21 MB' (1 KB = 1024 B)."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
 class SettingsPanel(QWidget):
     """Output settings for the open document plus a live summary and the Generate button.
 
@@ -74,9 +84,14 @@ class SettingsPanel(QWidget):
 
     PANEL_WIDTH = 280
 
-    def __init__(self, doc: Document, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, doc: Document, parent: QWidget | None = None, *, preview: object | None = None
+    ) -> None:
+        """``preview`` is an optional ``PreviewService``; when given, the summary card shows
+        its output size estimate. (The panel still only *writes* through ``Document``.)"""
         super().__init__(parent)
         self._doc = doc
+        self._preview = preview
         self._error: str | None = None  # last rejected edit, shown in the summary card
         self.setAccessibleName("Settings panel")
         self.setMinimumWidth(240)
@@ -87,6 +102,8 @@ class SettingsPanel(QWidget):
         root.setSpacing(8)
         root.addWidget(self._build_timing())
         root.addWidget(self._build_size())
+        self.crop_panel = CropPanel(doc)
+        root.addWidget(self.crop_panel)
         root.addWidget(self._build_quality())
         root.addWidget(self._build_summary())
         root.addStretch(1)
@@ -108,9 +125,17 @@ class SettingsPanel(QWidget):
             self.quality_group,
         ]
         self._connect_controls()
+        self.crop_panel.errorOccurred.connect(self._on_crop_error)
+        if preview is not None:
+            preview.estimateChanged.connect(self._refresh_summary)
+            preview.estimateReady.connect(self._refresh_summary)
         doc.sourceChanged.connect(self._on_source_changed)
         doc.stateChanged.connect(self._on_state_changed)
         self._on_source_changed()
+
+    def _on_crop_error(self, message: str) -> None:
+        self._error = message
+        self._refresh_summary()
 
     def sizeHint(self) -> QSize:
         """Preferred size: ~280 logical px wide, natural height."""
@@ -461,6 +486,17 @@ class SettingsPanel(QWidget):
             self.dither_check.setChecked(st.quality.dither)
             self.preset_combo.setCurrentIndex(_preset_index(st.quality))
 
+    def _estimate_line(self, frame_count: int) -> str:
+        """'Size: ≈ 1.24 MB' / 'Size: estimating…' / '' (no service, or no estimate)."""
+        p = self._preview
+        if p is None or frame_count == 0:
+            return ""
+        if p.estimated_bytes is not None and not p.estimate_pending:
+            return f"<b>Size:</b> \u2248 {format_bytes(p.estimated_bytes)} <i>(estimate)</i>"
+        if p.estimate_pending:
+            return "<b>Size:</b> <i>estimating\u2026</i>"
+        return ""
+
     def _refresh_summary(self) -> None:
         """Rebuild the rich-text summary card and the Generate button state."""
         meta = self._doc.meta
@@ -484,6 +520,9 @@ class SettingsPanel(QWidget):
                 f"<b>Output:</b> {s.frame_count} frames · "
                 f"{_fmt_seconds(s.duration_ms)} · {s.width}{TIMES}{s.height}"
             )
+            size_line = self._estimate_line(s.frame_count)
+            if size_line:
+                lines.append(size_line)
             if s.frame_count == 0:
                 lines.append(
                     f'<span style="color:{ERROR_COLOR}">'
