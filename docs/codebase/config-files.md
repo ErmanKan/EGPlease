@@ -56,13 +56,13 @@ The contract every contributor (human or agent) follows:
 - **Environment note:** the libEGL setup.
 - **Architecture rules:** no Qt in core; immutable `EditState` changed only via undo commands; `plan_output` is the only planner; pipeline order; QPixmap only on the GUI thread.
 - **Gate 1 product decisions.**
-- **Interface blocks** for core and UI (the `Document` hub, helpers, and each M2 widget's constructor, signals and public methods), with widget rules.
+- **Interface blocks** for core and UI (the `Document` hub, helpers, and each M2/M3 widget's and service's constructor, signals and public methods), with widget rules and the merge-key rule.
 - **Documentation and test rules**, conventional commits, the definition of done.
 
 Known drift from the code is listed in [`docs/03-architecture.md`](../03-architecture.md#known-drift-between-docs-and-code).
 
 ### `README.md`
-The front page: a short intro, the status (Milestones 1–2 done, M3 next), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`) and how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py`.
+The front page: a short intro, the status (Milestones 1–3 done, M4 then M5 next), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`) and how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py`.
 
 ## Invariants & gotchas
 - Pins appear in three places (`pyproject.toml`, `requirements*.txt`, the AGENTS.md "Stack" line). Change all three together.

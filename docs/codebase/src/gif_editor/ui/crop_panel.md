@@ -5,9 +5,9 @@
 ## Where it sits
 - **Layer:** ui (Qt)
 - **Used by:** `ui/settings_panel.py` — the orchestrator inserts it into the settings panel's root `QVBoxLayout` directly **below the existing "Output size" group** (`size_group`) and connects its `errorOccurred` signal into the summary card. Nothing else may host it.
-- **Uses:** `ui/document.py` (`Document`: `state`, `apply`, `is_open`, `meta`, `sourceChanged`, `stateChanged`), `core/models.py` (`CropRect`, `EditState`), `core/render.output_dimensions` (the "size follows the crop/base" rule). The other end of the two-way sync is `ui/inspector/crop_item.py` (the draggable rectangle), which writes `doc.state.crop` with the same merge key; this panel never imports it.
+- **Uses:** `ui/document.py` (`Document`: `state`, `apply`, `is_open`, `meta`, `sourceChanged`, `stateChanged`), `core/models.py` (`CropRect`, `EditState`), `core/render.output_dimensions` (the "size follows the crop/base" rule). The other end of the two-way sync is `ui/inspector/crop_item.py` (the draggable rectangle), which also writes `doc.state.crop`, but with its own per-drag merge key `"crop-drag-N"`; this panel never imports it.
 
-> **Integration note for the orchestrator:** this page specifies the widget only. `ui/settings_panel.py`, `ui/inspector/crop_item.py`, `ui/inspector/inspector.py` and `docs/codebase/INDEX.md` are **not** owned by this page and are wired by the orchestrator.
+> **Integration (done in `3adb5bd`):** `SettingsPanel` creates it as `self.crop_panel` between "Output size" and "Quality" and forwards `errorOccurred` into its summary card. The canvas `CropItem` is created by the main window, not by this widget.
 
 ## Public API
 | Name | Kind | Purpose |
@@ -62,12 +62,12 @@ All four spinboxes set `setKeyboardTracking(False)` (typing "20" applies on Ente
 flowchart LR
     C[control signal<br/>valueChanged / clicked / toggled / activated] --> H[_on_*_edited]
     H -->|doc.apply(state.with_(crop=...), "Crop", merge_key)| D[Document]
-    X[CropItem drag<br/>ui/inspector/crop_item.py] -->|doc.apply(..., merge_key="crop")| D
+    X[CropItem drag<br/>ui/inspector/crop_item.py] -->|"doc.apply(..., merge_key=crop-drag-N) on release"| D
     D -->|stateChanged| R[_refresh<br/>signals blocked]
     D -->|sourceChanged| F[_on_source_changed]
 ```
 
-1. **Control → state.** Every edit builds `doc.state.with_(crop=<CropRect or None>)` and calls `doc.apply(new, "Crop", merge_key=...)`. Spinbox edits pass `merge_key="crop"` so holding an arrow, scrolling the wheel over a spinbox or a canvas drag are **one** undo step. The three buttons and the group checkbox pass `merge_key=None` (each click is its own step and can never merge into a preceding scrub).
+1. **Control → state.** Every edit builds `doc.state.with_(crop=<CropRect or None>)` and calls `doc.apply(new, "Crop", merge_key=...)`. Spinbox edits pass `merge_key="crop"` so holding an arrow or scrolling the wheel over a spinbox is **one** undo step. (A canvas drag is also one step, but through its own key `"crop-drag-N"`, so it never merges with a spinbox scrub.) The three buttons and the group checkbox pass `merge_key=None` (each click is its own step and can never merge into a preceding scrub).
 2. **State → controls.** `doc.stateChanged` (our own edit, undo/redo, or a canvas drag) calls `_refresh()`, which rewrites every control from `doc.state` inside `_blocked()` — a context manager holding a `QSignalBlocker` on `aspect_combo`, all four spinboxes, `crop_group`, and the three buttons. Blocking is what stops a refresh (e.g. after undo) from re-entering the handlers and pushing a fresh command that would destroy the redo history.
 
 ### Refresh details (and the in-progress-text rule)

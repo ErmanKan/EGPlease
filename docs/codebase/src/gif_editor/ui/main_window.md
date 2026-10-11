@@ -1,6 +1,6 @@
 # `src/gif_editor/ui/main_window.py`
 
-> The top-level window. It owns the one `Document` and the one `Player`, lays out the settings panel and the inspector, defines every menu item and keyboard shortcut, and runs the slow jobs (open, Generate) in the background with error dialogs, a progress dialog and cancel.
+> The top-level window. It owns the one `Document`, the one `Player`, the `PreviewService` and the canvas `CropItem`, lays out the settings panel and the inspector, defines every menu item and keyboard shortcut, and runs the slow jobs (open, Generate) in the background with error dialogs, a progress dialog and cancel.
 
 ## Where it sits
 - **Layer:** ui (Qt: `QMainWindow`, `QAction`, `QFileDialog`, `QProgressDialog`, `QMessageBox`)
@@ -8,6 +8,7 @@
 - **Uses:**
   - `ui/document.py` (`Document`), `ui/workers.py` (`run_async`);
   - `ui/settings_panel.py` (`SettingsPanel`), `ui/inspector/inspector.py` (`Inspector`), `ui/inspector/player.py` (`Player`);
+  - `ui/inspector/preview.py` (`PreviewService`), `ui/inspector/crop_item.py` (`CropItem`) (M3);
   - `core/decoder.py` (`GifSource`), `core/encoder.py` (`Cancelled`), `core/pipeline.py` (`generate`, `export_frame_png`, `GenerateResult`).
 
 ## Public API
@@ -17,6 +18,8 @@
 | `GIF_FILTER`, `PNG_FILTER` | constants | File-dialog filters. |
 | `MainWindow(doc=None, parent=None)` | class (`QMainWindow`) | The window. Creates its own `Document` unless one is injected. 1300×820 by default. |
 | `.doc`, `.player` | attributes | The shared `Document` and `Player`. |
+| `.preview` | attribute | The `PreviewService` (M3): renders cropped/resized frames for the canvas and keeps the size estimate for the settings panel. |
+| `.crop_item` | attribute | The `CropItem` (M3) in the canvas scene. |
 | `.settings`, `.inspector` | attributes | The `SettingsPanel` and `Inspector` (whose children `canvas`, `transport`, `timebar`, `filmstrip` are public too). |
 | `.act_*` | `QAction` attributes | One per menu item / shortcut (table below). Tests call `act.trigger()`. |
 | `.last_error` | `str \| None` | The message of the last error shown. Lets tests check errors without a blocking dialog. |
@@ -32,27 +35,32 @@
 | `trim_in_here()`, `trim_out_here()`, `reset_trim()` | methods | Trim at the playhead (`I` / `O`) and reset the trim. |
 | `show_error(message, title="GIF Editor")` | method | Non-blocking warning box + status bar message; sets `last_error`. |
 
-Signals: none of its own. It connects to `Document.sourceChanged`, `SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred` and `FrameCanvas.zoomChanged`.
+Signals: none of its own. It connects to `Document.sourceChanged`, `SettingsPanel.generateRequested`, `TransportBar.saveFrameRequested`, `Filmstrip.errorOccurred`, `FrameCanvas.zoomChanged`, `Player.previewEditsChanged`, `PreviewService.geometryChanged`, `CropItem.cropActiveChanged` and `CropItem.previewChanged`.
 
 ## How it works
 
 ### Layout
 ```
 MainWindow (QMainWindow)
-├─ menu bar: File · Edit · Playback · View
+├─ menu bar: File · Edit · Crop · Playback · View
 ├─ central widget: QSplitter (horizontal), initial sizes 320 | 980
 │  ├─ QScrollArea (no horizontal scroll bar, min width = panel hint + 24)
-│  │  └─ SettingsPanel                      stretch 0: keeps its width
+│  │  └─ SettingsPanel(doc, preview=preview) stretch 0: keeps its width
+│  │     └─ … Output size · CropPanel · Quality · Summary (Size line) …
 │  └─ Inspector                             stretch 1: takes the extra width
 │     ├─ FrameCanvas                        stretch 1: takes the extra height
+│     │  └─ scene: pixmap item + CropItem   (added by the window)
 │     ├─ TransportBar
 │     ├─ TimeBar
 │     └─ Filmstrip
 └─ status bar: messages on the left, permanent zoom label ("100%") on the right
 Player (QObject, no widget): owned by the window, passed to the Inspector → TransportBar
+PreviewService (QObject, no widget): owned by the window; canvas.set_preview(it), SettingsPanel(preview=it)
 ```
 - The settings panel sits in a `QScrollArea` so that a short window (or a large font) scrolls the panel instead of squashing its spin boxes. The scroll area's minimum width comes from the panel's `minimumSizeHint`, so the splitter can never hide the controls.
 - The `Player` is not a widget. The window owns it because both the menu actions and the transport buttons drive it, and there must be exactly one per document.
+- **`PreviewService` is owned here for the same reason (M3):** two widgets consume it (the canvas shows its frames, the settings panel shows its size estimate) and the window's P action drives it. It is created right after the `Player` and handed to both: `SettingsPanel(self.doc, preview=self.preview)` and, in `_connect`, `inspector.canvas.set_preview(self.preview)`. Neither widget creates or controls it.
+- **`CropItem` is created here and added to the canvas scene** (`self.inspector.canvas.scene().addItem(self.crop_item)`), not by `FrameCanvas`. The canvas stays a generic viewer, and the window, which owns the crop tool action, the Crop menu and the preview toggle, is the one place that decides when the rectangle is visible.
 
 ### Actions and shortcuts
 Every action is created by `_action()`, which also calls `self.addAction(act)`. Adding the action to the **window** (not only to a menu) makes its shortcut work anywhere in the window, even while a menu is hidden. Shortcuts given as `QKeySequence.StandardKey` follow the platform convention; the Windows values are shown.
@@ -63,17 +71,21 @@ Every action is created by `_action()`, which also calls `self.addAction(act)`. 
 | File | Generate… (`act_generate`) | Ctrl+G | `generate_dialog()` (also the panel's Generate button) |
 | File | Save frame as PNG… (`act_save_frame`) | Ctrl+Shift+S | `save_frame_dialog(False)`: original frame (also the transport's "Save frame…" button) |
 | File | Save frame with crop/size… (`act_save_frame_edited`) | — | `save_frame_dialog(True)`: crop + resize applied |
-| File | Close (`act_close`) | Ctrl+F4 (standard `Close`) | `doc.close()` |
-| File | Quit (`act_quit`) | standard `Quit` (none on Windows; Alt+F4 closes the window) | `self.close()` → `closeEvent` |
+| File | Close (`act_close`) | Ctrl+W | `doc.close()` |
+| File | Quit (`act_quit`) | Ctrl+Q (Alt+F4 also closes the window) | `self.close()` → `closeEvent` |
 | Edit | Undo (`act_undo`) | Ctrl+Z | `undo_stack.undo()`. Menu text shows the step, e.g. "Undo Change trim" |
-| Edit | Redo (`act_redo`) | Ctrl+Y | `undo_stack.redo()` |
+| Edit | Redo (`act_redo`) | Ctrl+Y, Ctrl+Shift+Z | `undo_stack.redo()` |
 | Edit | Delete frame(s) (`act_delete`) | Del | `filmstrip.delete_selected()` (selection, or the current frame if none) |
 | Edit | Restore frame(s) (`act_restore`) | Ctrl+Shift+Del | `filmstrip.restore_selected()` |
 | Edit | Set trim start at playhead (`act_trim_in`) | I | `trim_in_here()` |
 | Edit | Set trim end at playhead (`act_trim_out`) | O | `trim_out_here()` |
 | Edit | Reset trim (`act_trim_reset`) | — | `reset_trim()` |
+| Crop | Crop tool (`act_crop_tool`, checkable) | C | `_on_crop_tool_toggled(checked)`: show/hide the rectangle; turning it on with no crop creates a 10% inset box (rules below) |
+| Crop | Remove crop (`act_crop_reset`) | — | `crop_item.reset()`: `crop=None`, one undo step |
+| Crop | Move crop left / right / up / down (`act_crop_nudge[0..3]`) | Ctrl+Left / Ctrl+Right / Ctrl+Up / Ctrl+Down | `crop_item.nudge(dx, dy)` by 1 image px, clamped; one undo step per press |
+| Crop | Narrow / Widen / Shorten / Lengthen crop (`act_crop_resize[0..3]`) | Ctrl+Shift+Left / Right / Up / Down | `crop_item.resize(dw, dh)` by 1 px, moving the right/bottom edge; one undo step per press |
 | Playback | Play / pause (`act_play`) | Space | `player.toggle()` |
-| Playback | Preview edits (`act_preview`, checkable) | P | `player.set_preview_edits(checked)`; kept in sync with `previewEditsChanged` and the transport check box |
+| Playback | Preview edits (`act_preview`, checkable) | P | Previews the **whole output**: `player.set_preview_edits(checked)` (timing), and `previewEditsChanged → preview.set_geometry_enabled` (crop + resize on the canvas). Kept in sync with the transport check box |
 | Playback | First frame (`act_first`) | Home | `player.go_first()` |
 | Playback | Back 10 frames (`act_prev10`) | Shift+Left | `player.step(-10)` |
 | Playback | Previous frame (`act_prev`) | Left | `player.step(-1)` |
@@ -88,7 +100,32 @@ Every action is created by `_action()`, which also calls `self.addAction(act)`. 
 Notes:
 - Navigation goes through the `Player`, not `doc.set_current_index`, so it steps within the *current* sequence: with "Preview edits" on, Left/Right skip trimmed and deleted frames. `step` **wraps** (Right on the last frame goes to the first).
 - Undo/Redo come from `QUndoStack.createUndoAction`/`createRedoAction`. The stack enables/disables them and updates their text itself, so they are not in the window's enable list.
-- `setShortcut(StandardKey)` binds only the platform's **first** binding. So Close is Ctrl+F4 only (not Ctrl+W), and Redo is Ctrl+Y only: `act_redo.setShortcuts([Redo, "Ctrl+Y"])` adds Ctrl+Y twice on Windows, and Ctrl+Shift+Z is not bound. (Checked with `QKeySequence.keyBindings` in the container; Qt's Windows table gives the same first bindings.)
+- `setShortcut(StandardKey)` would bind only the platform's **first** binding, so `_action()` calls `setShortcuts(StandardKey)` (all bindings) for standard keys. Close and Quit use explicit `"Ctrl+W"` / `"Ctrl+Q"` because Qt's Windows table has Ctrl+F4 and no Quit key; Redo is bound to both Ctrl+Y and Ctrl+Shift+Z (`76cd65c`, `test_shortcuts_cover_platform_bindings`).
+- **Crop keys use Ctrl because plain arrows are taken:** Left/Right step frames and Shift+Left/Right step 10. Nudge/resize are window actions like every other shortcut; nothing is routed through `FrameCanvas.keyPressEvent`.
+
+### "Preview edits" (P): timing and geometry
+In M2, P played the edited timing only. In M3 it previews the whole output, because "what will the GIF look like" includes the crop and the output size:
+```
+act_preview.toggled ──► player.set_preview_edits(on)          (timing: output frames and delays)
+player.previewEditsChanged ──► preview.set_geometry_enabled    (canvas shows crop + resize)
+                          └──► act_preview.setChecked          (two-way binding, as in M2)
+preview.geometryChanged ──► _update_crop_tool()                (hide the source-pixel rectangle)
+```
+The geometry follows `previewEditsChanged`, not the action, so the transport's "Preview edits" check box (which drives the player directly) turns geometry on too. While it is on, the canvas scene is the output image, so the crop rectangle is hidden (next section).
+
+### The crop tool (C)
+The crop rectangle is a *tool* the user can show or hide; the crop itself is `doc.state.crop`. Rules, all in the window:
+
+| Situation | What happens | Code |
+|---|---|---|
+| A file is opened (or closed) | Tool **off**, rectangle hidden: a fresh image shows no handles. The action is unchecked with signals blocked, so this does not create a crop. | `_sync_crop_tool` on `sourceChanged` |
+| User turns the tool **on** and there is **no crop** | `crop_item.activate()` creates a box 10% inside each edge (`CropRect(4, 3, 32, 24)` on 40×30) as one undo step, so there is something to drag | `_on_crop_tool_toggled` |
+| User turns the tool on and a crop exists | The existing crop is shown | `_on_crop_tool_toggled` |
+| A crop **appears from elsewhere** (the panel's Crop tick, undo) | Tool turns **on** automatically, so the crop is visible on the canvas | `_on_crop_active_changed(True)` |
+| The crop is removed | The tool stays as it was (the user may want to drag a new one) | `_on_crop_active_changed(False)` does nothing |
+| "Preview edits" is on | Rectangle **hidden** even if the tool is checked; it comes back when preview ends | `_update_crop_tool`: `set_tool_enabled(checked and not preview.geometry_enabled)` |
+
+While dragging, `CropItem.previewChanged(QRectF)` → `_on_crop_dragged` shows **"Crop W×H at X,Y"** in the status bar for 2 s, updated on every move. The document is not written until the mouse is released (one undo step per drag; see [crop_item](inspector/crop_item.md)).
 
 ### Opening a file (async) and drag-and-drop
 `GifSource.open` reads and composites every frame, which can take seconds, so it must not run on the GUI thread (AGENTS.md: no more than about 16 ms per event).
@@ -129,7 +166,7 @@ sequenceDiagram
     alt success
         WK-->>MW: on_done(GenerateResult)
         MW->>MW: finish(): _generating = False, close dialog, re-enable
-        MW->>U: status "Saved out.gif: N frames, D s, W×H, S KB"
+        MW->>U: status "Saved out.gif: N frames, D s, W×H, S KB — warnings"
     else Cancelled
         WK-->>MW: on_error(msg, Cancelled)
         MW->>U: status "Generate cancelled, nothing was written"
@@ -143,13 +180,13 @@ Why it is safe to keep editing while Generate runs:
 - **The source cannot disappear.** Open, Close and drop are refused while `_generating`, and `closeEvent` refuses to close (below). `GifSource` is thread-safe, so the canvas and filmstrip may keep reading frames concurrently.
 - **Cancel is cooperative.** The progress dialog's `canceled` signal (Cancel button or Esc) calls `Event.set()` directly; the encoder checks the event between frames and before committing. `encoder.Cancelled` arrives through `on_error` and is reported as a status message, not an error.
 - **Atomic write.** `pipeline.generate` writes to a temp file, reads it back and verifies frame count and durations, then `os.replace`s it onto the destination. Cancel, an error or a failed verification deletes the temp file and leaves an existing `out.gif` untouched, so overwriting the source file itself is safe.
-- `doc.plan()` is computed up front only for the progress maximum (`max(total, 1)`). An empty plan is not checked here: `generate` raises `ValueError("nothing to generate: …")`, which shows as "Generate failed". (The panel's Generate button is already disabled for an empty output; the Ctrl+G action is not.)
+- **Empty output is refused before any dialog.** `generate_dialog` (Ctrl+G) checks `doc.plan().frame_count == 0` and shows "Nothing to generate: …" instead of opening a file dialog; `generate_to` checks again (it can be called directly) and also uses `plan.frame_count` as the progress maximum. This mirrors the panel's Generate button, which is disabled for an empty output (`76cd65c`).
 - `setMinimumDuration(300)`: a fast Generate never flashes a dialog.
 
 ### Save frame as PNG
 `save_frame_to(path, with_edits)` calls `pipeline.export_frame_png(source, doc.current_index, path, state)`:
 - **without edits** (`state=None`): the composited source frame at full size, RGBA, so transparency is kept;
-- **with edits** (`state=doc.state`): crop then resize, exactly like a Generate frame but in full colour (no palette). Timing edits do not apply to a single frame. In M2 the crop can only be set programmatically (the crop rectangle arrives in M3); the output size can be set in the settings panel.
+- **with edits** (`state=doc.state`): crop then resize, exactly like a Generate frame but in full colour (no palette). Timing edits do not apply to a single frame. The crop comes from the canvas rectangle or the crop panel, the size from the Output size group.
 
 It always saves the **source** frame under the playhead, even a deleted or trimmed-out one. It runs synchronously on the GUI thread: the frame comes from the decoder's cache, and one PNG encode is quick for normal GIF sizes. The write is atomic (temp file + `os.replace`). `OSError`/`ValueError` (e.g. an unwritable folder) → `show_error("Could not save the frame…")` and `None`.
 
@@ -191,13 +228,19 @@ The filmstrip's `errorOccurred(str)` (e.g. "Cannot delete every frame") is conne
   - the filmstrip claims Delete/Backspace/Insert and handles them itself (same result as the action: delete or restore the selection).
 - **The timebar's own arrow keys are shadowed** in the window: it does not accept `ShortcutOverride`, so Left/Right/Home/End reach the window actions (`player.step`, which wraps) instead of `TimeBar.keyPressEvent` (which clamps). Standalone the timebar still handles them.
 - `act_preview` is two-way bound to the player (`toggled → set_preview_edits`, `previewEditsChanged → setChecked`); the transport check box is bound the same way, so all three stay in sync without loops (the player emits only on change).
-- `GenerateResult.warnings` (e.g. "N frames dropped") are not shown after Generate; the settings panel's summary already shows the same warnings before Generate.
+- `GenerateResult.warnings` (e.g. "N frames dropped") are appended to the "Saved …" status message (15 s), as well as being shown in the summary card before Generate.
+- **Crop actions need the tool on.** "Remove crop" and the Ctrl+arrow nudge/resize actions are enabled whenever a file is open, but `CropItem` ignores them while the tool is off or hidden (`_can_edit()` requires `tool_enabled`). So with the tool off, or during "Preview edits", they silently do nothing (verified by hand; not covered by a test). Turn the tool on (C) or use the crop panel.
+- The status-bar drag message comes from `previewChanged`, which fires only while dragging; nudges and panel edits do not show it.
 - The panel's Generate button is *not* disabled while generating (it is not an action); `generate_dialog` simply returns while `_generating` is set.
 - Save-frame file names use the 1-based frame number (`-frame004.png` for index 3), matching the transport label.
 
 ## Tests
-- `tests/ui/test_main_window.py` (14 cases): empty start, async open, bad file, drop, navigation/delete/undo via actions, a real key press reaching an action, I/O trim, Generate end to end, Generate cancel, PNG export with and without edits, preview binding, play/pause + Close, re-open, and `app.main`. See [its page](../../../tests/ui/test_main_window.md).
+- `tests/ui/test_main_window.py` (17 cases): empty start, async open, bad file, drop, navigation/delete/undo via actions, a real key press reaching an action, I/O trim, Generate end to end, Generate cancel, shortcut bindings, Ctrl+G refusing an empty output, warnings in the Generate status, PNG export with and without edits, preview binding, play/pause + Close, re-open, and `app.main`. See [its page](../../../tests/ui/test_main_window.md).
+- `tests/ui/test_m3_integration.py` (window part): the crop tool starts off and activates a 10% box; a panel crop turns the tool on; a real mouse drag is one undo step and syncs the panel; Ctrl+arrow nudge/resize; hidden during P; Remove crop and the reset on a new file; Generate writes the canvas crop; P toggles geometry. See [its page](../../../tests/ui/test_m3_integration.md).
 - **Gaps:** the file dialogs themselves (`*_dialog` methods); `closeEvent` while generating; the progress dialog's Cancel button (the test calls `cancel_generate()`); Generate error path (non-cancel); Save-frame error path.
 
 ## History
 - `be70f38`: written by the orchestrator to integrate the M2 widgets ([dev log, Milestone 2](../../../../04-development-log.md#milestone-2-window-and-inspector)). Design choices: actions on the window so shortcuts are global; `QMessageBox.open()` + `last_error` for headless tests; the canvas refuses drops so the window handles them; Space kept for play/pause (the common video-player convention) at the cost of Space+drag panning.
+- `76cd65c` (after M2): all platform bindings for standard keys, Close = Ctrl+W, Quit = Ctrl+Q, Redo also Ctrl+Shift+Z; Ctrl+G refuses an empty output; Generate warnings in the status bar.
+- `3adb5bd` (M3): `PreviewService` owned here and shared with the canvas and the settings panel; P previews timing **and** geometry.
+- `484382d` (M3): `CropItem` in the canvas scene, Crop menu (tool C, Remove crop, Ctrl+arrow nudge, Ctrl+Shift+arrow resize), the crop-tool rules and the drag status message. See [dev log, Milestone 3](../../../../04-development-log.md#milestone-3-crop-and-live-preview).

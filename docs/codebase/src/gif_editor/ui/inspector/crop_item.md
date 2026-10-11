@@ -4,7 +4,7 @@
 
 ## Where it sits
 - **Layer:** ui (Qt)
-- **Used by:** `ui/inspector/canvas.py` hosts it in its scene (the orchestrator wires it in); `ui/main_window.py` / `ui/settings_panel.py` may call `activate()`, `reset()`, `nudge()`, `resize()`, `set_tool_enabled()` and listen to `cropActiveChanged`.
+- **Used by:** `ui/main_window.py`, which creates it and adds it to the canvas scene (`canvas.scene().addItem(...)`; `FrameCanvas` itself has no crop code), calls `activate()`, `reset()`, `nudge()`, `resize()`, `set_tool_enabled()`, and listens to `cropActiveChanged` and `previewChanged`.
 - **Uses:** `ui/document.py` (`Document`: `state`, `apply`, `meta`, `is_open`, `sourceChanged`, `stateChanged`), `core/models.py` (`CropRect`). It never imports `crop_panel.py`; the two meet only through `doc.state.crop`.
 
 ## Public API

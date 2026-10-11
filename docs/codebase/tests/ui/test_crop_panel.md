@@ -14,7 +14,7 @@
 | `test_*` | tests | See below. |
 
 ## How it works
-Tests drive the real child widgets (`setValue`, `click`, `setChecked`, `activated.emit`) exactly as user input would — `setValue` emits `valueChanged` just like typing + Enter — then assert on `doc.state.crop`, `doc.undo_stack` and the widgets. Canvas drags are simulated by calling `doc.apply(doc.state.with_(crop=...), "Crop", merge_key="crop")` on the shared `Document`, which is exactly what `CropItem` does; this is the two-way-sync seam. The fixture canvas is 40×30 (so X,Y range `0…39` / `0…29`, W `1…40`, H `1…30`).
+Tests drive the real child widgets (`setValue`, `click`, `setChecked`, `activated.emit`) exactly as user input would — `setValue` emits `valueChanged` just like typing + Enter — then assert on `doc.state.crop`, `doc.undo_stack` and the widgets. Canvas drags are simulated by the helper `_crop(doc, x, y, w, h, key="crop")`, which calls `doc.apply(doc.state.with_(crop=...), "Crop", merge_key=key)` on the shared `Document`; this is the two-way-sync seam. The canvas-drag tests pass `key="crop-drag-1"`, the key `CropItem` really uses on release (its default `"crop"` is the spinbox key). The fixture canvas is 40×30 (so X,Y range `0…39` / `0…29`, W `1…40`, H `1…30`).
 
 ### Behaviour checklist (≥ 12, each individually testable)
 1. `test_initial_values_no_crop` — fresh `doc`: `crop_group` unchecked, `state.crop is None`, spinboxes show the full canvas (X=0, Y=0, W=40, H=30), combo on `Free`, status `"No crop (full frame 40×30)"`.

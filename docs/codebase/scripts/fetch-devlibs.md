@@ -22,9 +22,9 @@ Pinned values: `PKG=libegl1`, `VER=1.7.0-1+b2`, `SHA256=62e7bc8c…12406`, URL u
 5. `scripts/test.sh` then puts `.devlibs/root/usr/lib/x86_64-linux-gnu` on `LD_LIBRARY_PATH`.
 
 ### Trust chain
-The header comment describes the chain as: Debian archive key (local keyring) → signed `InRelease` → `Packages` index hash → package SHA-256.
+The header comment says what the script verifies (the package's SHA-256 against the pin) and how the pin was obtained: Debian archive key → `sqv --message` on the signed `InRelease` → `Packages` index hash → the package SHA-256 listed there.
 
-**What the script itself enforces is only the last link: the pinned SHA-256.** The earlier links were verified **once, by hand, when the hash was pinned** (dev log, `cc9f0fa`, "with the user's approval"). After that, the pinned hash is the trust anchor: any change to the file on the mirror makes the script fail. (The header comment reads as if the script checked the whole chain; it does not.)
+**What the script itself enforces is only the last link: the pinned SHA-256.** The earlier links were verified **once, by hand, when the hash was pinned** (dev log, `cc9f0fa`, "with the user's approval"). After that, the pinned hash is the trust anchor: any change to the file on the mirror makes the script fail. (Until `76cd65c` the header comment read as if the script checked the whole chain; it now says it checks only the hash.)
 
 The manual check, in three steps (the container is Debian trixie, whose archive keyring is at `/usr/share/keyrings/debian-archive-keyring.pgp`):
 1. **Signature:** `sqv --message` verifies the clearsigned `InRelease` against the keyring and writes the authenticated `Release` text.

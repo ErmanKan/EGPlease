@@ -4,7 +4,7 @@
 
 ## Where it sits
 - **Layer:** ui (Qt), but it owns no widget.
-- **Used by:** the main window / inspector wiring (canvas shows `frameReady` images when the geometry preview is on; the settings panel's summary card shows `estimated_bytes`).
+- **Used by:** `ui/main_window.py`, which owns it and hands it to `FrameCanvas.set_preview` (the canvas shows `frameReady` images while the geometry preview is on) and to `SettingsPanel(preview=...)` (the summary card shows `estimated_bytes`); `Player.previewEditsChanged` drives `set_geometry_enabled`.
 - **Uses:** `ui/document.py` (reads `source`, `state`, `plan()`, `current_index`), `core/render.render_frame`, `core/pipeline.estimate_size`, `ui/workers.run_async`, `ui/qt_image.pil_to_qimage`.
 
 ## Public API
