@@ -262,6 +262,8 @@ class MainWindow(QMainWindow):
         self.inspector.filmstrip.errorOccurred.connect(self.show_error)
         self.inspector.canvas.set_preview(self.preview)
         self.crop_item.cropActiveChanged.connect(self._on_crop_active_changed)
+        # The canvas takes Space for Space+drag panning; a tap without a drag plays.
+        self.inspector.canvas.spaceTapped.connect(self.player.toggle)
         self.crop_item.previewChanged.connect(self._on_crop_dragged)
         self.preview.geometryChanged.connect(lambda _on: self._update_crop_tool())
         self.doc.sourceChanged.connect(self._sync_crop_tool)

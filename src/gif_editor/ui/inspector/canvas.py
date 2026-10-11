@@ -54,6 +54,10 @@ class FrameCanvas(QGraphicsView):
     """
 
     zoomChanged = Signal(float)
+    #: Space was pressed and released over the canvas without a drag in between. The
+    #: canvas takes Space from the window's play/pause shortcut (so Space+drag can pan);
+    #: the main window connects this to play/pause so a plain tap still plays.
+    spaceTapped = Signal()
 
     def __init__(self, doc: Document, parent: QWidget | None = None) -> None:
         """Create the canvas bound to ``doc`` and show the current frame (if any)."""
@@ -62,6 +66,7 @@ class FrameCanvas(QGraphicsView):
         self._zoom = 1.0
         self._fit_mode = True
         self._space_held = False
+        self._space_dragged = False  # a mouse button went down while Space was held
         self._middle_panning = False
         self._checker = checkerboard_brush()
         self._preview = None  # PreviewService, attached by the main window (optional)
@@ -375,8 +380,29 @@ class FrameCanvas(QGraphicsView):
             event.modifiers(),
         )
 
+    def event(self, event: QEvent) -> bool:
+        """Claim plain Space from the window's play/pause shortcut while focused.
+
+        Qt offers a key to the focused widget as a ShortcutOverride before any window
+        shortcut fires; accepting it delivers Space here as a normal key press. Without
+        this, the Space shortcut ate the key and Space+drag panning could never start.
+        A tap without a drag is handed back as ``spaceTapped`` (play/pause).
+        """
+        if (
+            event.type() == QEvent.Type.ShortcutOverride
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._doc.is_open
+        ):
+            event.accept()
+            return True
+        return super().event(event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Middle button starts a hand-drag pan."""
+        if self._space_held:
+            self._space_dragged = True
         if event.button() == Qt.MouseButton.MiddleButton:
             self._middle_panning = True
             self._begin_pan()
@@ -407,6 +433,7 @@ class FrameCanvas(QGraphicsView):
         """Holding Space turns left-drag into panning."""
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_held = True
+            self._space_dragged = False
             self._begin_pan()
             event.accept()
             return
@@ -418,9 +445,12 @@ class FrameCanvas(QGraphicsView):
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         """Releasing Space ends Space+drag panning."""
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self._space_held = False
+            was_held, dragged = self._space_held, self._space_dragged
+            self._space_held = self._space_dragged = False
             self._end_pan()
             event.accept()
+            if was_held and not dragged:
+                self.spaceTapped.emit()
             return
         super().keyReleaseEvent(event)
 

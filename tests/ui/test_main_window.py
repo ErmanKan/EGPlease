@@ -301,3 +301,54 @@ def test_window_fits_small_screen_and_generate_stays_visible(qtbot, monkeypatch)
     assert not w.findChild(QScrollArea).isAncestorOf(gen)
     top_left = gen.mapTo(w, gen.rect().topLeft())
     assert w.rect().contains(QRect(top_left, gen.size()))
+
+
+def _space_window(qtbot, gif_path, tmp_path):
+    big = make_gif(tmp_path / "big.gif", solid_frames(4, (400, 300)), 100)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    w.open_file(big)
+    qtbot.waitUntil(lambda: w.doc.is_open and not w.is_busy, timeout=10_000)
+    return w
+
+
+def test_space_tap_on_canvas_plays(qtbot, gif_path, tmp_path):
+    w = _space_window(qtbot, gif_path, tmp_path)
+    canvas = w.inspector.canvas
+    canvas.setFocus()
+    qtbot.waitUntil(canvas.hasFocus)
+    qtbot.keyClick(canvas, Qt.Key.Key_Space)
+    assert w.player.is_playing
+    qtbot.keyClick(canvas, Qt.Key.Key_Space)
+    assert not w.player.is_playing
+
+
+def test_space_drag_on_canvas_pans_without_playing(qtbot, gif_path, tmp_path):
+    from PySide6.QtCore import QPoint
+
+    w = _space_window(qtbot, gif_path, tmp_path)
+    canvas = w.inspector.canvas
+    canvas.set_zoom(8)  # 3200x2400 px: scrollable both ways
+    canvas.setFocus()
+    qtbot.waitUntil(canvas.hasFocus)
+    vp = canvas.viewport()
+    h0 = canvas.horizontalScrollBar().value()
+    qtbot.keyPress(canvas, Qt.Key.Key_Space)
+    centre = vp.rect().center()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=centre)
+    for k in range(1, 6):
+        qtbot.mouseMove(vp, centre + QPoint(20 * k, 0))
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=centre + QPoint(100, 0))
+    qtbot.keyRelease(canvas, Qt.Key.Key_Space)
+    assert canvas.horizontalScrollBar().value() < h0  # dragged right = view moved left
+    assert not w.player.is_playing  # the drag consumed the Space
+
+
+def test_space_elsewhere_still_plays(qtbot, gif_path, tmp_path):
+    w = _space_window(qtbot, gif_path, tmp_path)
+    w.inspector.filmstrip.setFocus()
+    qtbot.waitUntil(w.inspector.filmstrip.hasFocus)
+    qtbot.keyClick(w.inspector.filmstrip, Qt.Key.Key_Space)
+    assert w.player.is_playing
