@@ -89,7 +89,8 @@ def test_keys_are_case_insensitive_but_paths_are_not():
     """Keys are lowercased; a path must survive verbatim (Windows paths are case-insensitive
     but a Linux CI machine is not, and mangling the user's path would be worse)."""
     _st, out = parse_spec("TRIM=0:100,OUT=Out/MyFile.GIF", EditState())
-    assert str(out) == "Out/MyFile.GIF"
+    # Compare parts, not text: Windows spells the same path `Out\MyFile.GIF`.
+    assert out.parts == ("Out", "MyFile.GIF")
 
 
 def test_out_path_is_returned():

@@ -11,8 +11,8 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -25,7 +25,10 @@ jobs:
 
       - name: Lint and test
         env:
-          QT_QPA_PLATFORM: offscreen
+          # Qt's default offscreen screen is 800x600, smaller than the test windows (mouse events
+          # past x=800 never arrive). Same 3840x2160 virtual screen as scripts/test.sh. The path
+          # must be relative: Qt splits this value on ':', which would cut a "D:\..." path.
+          QT_QPA_PLATFORM: "offscreen:configfile=scripts/offscreen-screen.json"
         run: |
           ruff format --check .
           ruff check .
@@ -44,7 +47,7 @@ jobs:
         run: python scripts/smoke_build.py out/dist/GifEditor.exe
 
       - name: Upload the executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: GifEditor-windows
           path: out/dist/GifEditor.exe

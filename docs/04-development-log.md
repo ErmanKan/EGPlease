@@ -403,3 +403,10 @@ What this proves: the recipe bundles a working app (core and Qt half). What it d
 
 ### Documentation pass (M5)
 New pages for `scripts/build.py`, `check_build_flags.py`, `make_icon.py`, `smoke_build.py`, `gif_editor/headless.py`, `gif_editor/resources/__init__.py` and the three new test files; the icons, `packaging/build-requirements.txt` and `build-exe.yml` added to the config page; the `app.py` page updated (`--edit-spec`, window icon, `--smoke-gui`, file argument); INDEX rows (and two missing page links fixed); this section; the testing guide (build checks, smoke test, the `TMPDIR` note); README (status, *Build the .exe*), AGENTS.md (M5 interfaces and rules) and the architecture tree.
+
+### First CI run on GitHub (`ErmanKan/EGPlease`, commit `4cefea2`)
+Both workflows failed at the test step: **713 passed, 2 failed, 1 skipped** on Windows Server 2025, Python 3.13.15. Neither was an app bug:
+- `test_keys_are_case_insensitive_but_paths_are_not` compared a path as text (`Out/MyFile.GIF`); Windows spells the same path `Out\MyFile.GIF`. The test now compares `Path.parts`.
+- `test_cursor_and_tooltip` moved the mouse past x=800 on Qt's default 800×600 offscreen screen, so the event never arrived (the M4 HiDPI lesson again: `scripts/test.sh` had the 3840×2160 screen config, the workflows did not). Both workflows now set `QT_QPA_PLATFORM=offscreen:configfile=scripts/offscreen-screen.json`; the path is relative because Qt splits that value on `:`, which would cut a `D:\...` path.
+- Also: `ci.yml` now installs `packaging/build-requirements.txt` (the flag-checker tests import Nuitka), and the actions moved to `checkout@v7`, `setup-python@v7`, `upload-artifact@v7` (Node 24; the v4/v5 ones raised a Node 20 deprecation warning).
+- The `resource` test is skipped on Windows by design (POSIX-only module).

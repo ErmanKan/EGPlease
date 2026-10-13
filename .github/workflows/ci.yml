@@ -6,13 +6,17 @@ jobs:
   test:
     runs-on: windows-latest
     env:
-      QT_QPA_PLATFORM: offscreen
+      # Qt's default offscreen screen is 800x600, smaller than the test windows (mouse events
+      # past x=800 never arrive). Same 3840x2160 virtual screen as scripts/test.sh. The path
+      # must be relative: Qt splits this value on ':', which would cut a "D:\..." path.
+      QT_QPA_PLATFORM: "offscreen:configfile=scripts/offscreen-screen.json"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install -r requirements-dev.txt
+      # build-requirements too: tests/core/test_check_build_flags.py runs Nuitka's parser.
+      - run: python -m pip install -r requirements-dev.txt -r packaging/build-requirements.txt
       - run: ruff check .
       - run: ruff format --check .
       - run: python -m pytest -q
