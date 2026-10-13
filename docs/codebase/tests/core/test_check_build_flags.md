@@ -10,29 +10,27 @@
 ## Public API
 | Test | Verifies |
 |---|---|
-| `known` | module-scoped fixture: `known_options()` once (importing Nuitka's parser takes a moment). |
-| `test_committed_command_lines_are_valid` | `check()` returns no problems for the Linux and the Windows command line `build.py` really produces. |
-| `test_injected_bad_flag_is_caught[--cache-dir={TMP}]` | Not a Nuitka option (cost one 20-minute build). |
-| `test_injected_bad_flag_is_caught[--no-console]` | Not a Nuitka option (cost another). |
-| `test_injected_bad_flag_is_caught[--windows-icon-from-ico=/tmp/x.ico]` | Windows-only flag leaking into the Linux build. |
-| `test_injected_bad_flag_is_caught[--invented-flag=1]` | Any made-up flag. |
-| `test_missing_plugin_flag_is_caught` | With `--enable-plugin=…` removed, the `--noinclude-*-mode` options are reported. |
+| `test_committed_command_lines_are_valid` | `check()` returns no problems for the Linux and the Windows command `build.py` really produces, run as Linux, Windows, Linux: each check builds a fresh Nuitka parser, and the repeat proves the second and third still get the plugin options (they did not, before `plugin_options` was cleared). |
+| `test_injected_bad_flag_is_rejected[--cache-dir=out/cache]` | Not a Nuitka option (cost one full build). Rejected on both platforms. |
+| `test_injected_bad_flag_is_rejected[--no-console]` | Not a Nuitka option (cost another). |
+| `test_injected_bad_flag_is_rejected[--onefile-tempdir-spec-typo={TEMP}]` | A misspelt real option. |
+| `test_injected_bad_flag_is_rejected[--invented-flag=1]` | A made-up flag. |
+| `test_windows_only_flag_must_not_reach_a_linux_build` | `--windows-icon-from-ico` added to the Linux command only is reported. Nuitka would accept it (on Linux it only warns), so this is the checker's own platform rule. |
+| `test_plugin_options_need_their_plugin` | With `--enable-plugin=pyside6` removed, Nuitka's parser rejects `--noinclude-qt-plugins` (it belongs to the pyside6 plugin): real Nuitka behaviour, not a rule of the checker. |
+| `test_rejected_flags_uses_prefix_matching` | `--enable-plugin` (a prefix of `--enable-plugins`) is accepted, as by Nuitka. |
 
-**6 test cases** (3 functions, one parametrized 4 ways).
+**8 test cases** (5 functions, one parametrized 4 ways).
 
 ## How it works
-`monkeypatch` replaces `build.build_command` (on the `build` module the checker imported) with a wrapper around the real one:
-- **Injected flag:** the bad flag is inserted before the last argument. The Windows-icon flag is inserted only into the Linux command, because on Windows it is correct. Both platforms are then checked, and the test requires at least one problem that names the flag.
-- **Missing plugin flag:** every argument starting with `--enable-plugin` is removed, and the Linux check must report a problem mentioning `noinclude`.
-
-The `/tmp/x.ico` and `{TMP}` strings are flag *values* only; nothing is written.
+`monkeypatch` replaces `build.build_command` (on the `build` module the checker imported) with a wrapper around the real one that appends or removes flags; the checker then runs on the result. Flag values such as `out/cache` and `x.ico` are strings only; nothing is written.
 
 ## Invariants & gotchas
-- The parametrized cases are the project's real history: if a new flag mistake costs a build, add it here.
-- `test_missing_plugin_flag_is_caught` tests the checker's own rule ("`--noinclude-*-mode` only alongside a plugin flag"). That rule is stricter than Nuitka itself, which registers those anti-bloat options even without `--enable-plugin` ([checker page](../../scripts/check_build_flags.md#why-the-plugin-options-are-special)). Dropping the PySide6 plugin would break the app anyway, so being told is useful; just don't read the test as "Nuitka rejects this".
+- The bad-flag cases are the project's real history: if a new flag mistake costs a build, add it here.
+- These tests run Nuitka's parser, so they also pin Nuitka 4.3 behaviour the build relies on (plugin options exist only with their plugin; prefixes are accepted). A Nuitka upgrade that changes either shows up here first.
 
 ## Tests
-- **Gaps:** flag *values* (paths, plugin names) are not checked by the checker, so not here either.
+- **Gaps:** combinations of flags (two conflicting modes) are not checked, because each flag is parsed alone.
 
 ## History
 - `a2e41d0` (M5): added with the checker ([dev log, Milestone 5](../../../04-development-log.md#four-wrong-flags-four-lost-builds)).
+- `866533e` (M5): rewritten for the parser-based checker (prefix matching, real plugin-option rule, stale-registry guard).

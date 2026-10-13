@@ -9,58 +9,58 @@
 
 ## Public API
 ```bash
-.venv/bin/python scripts/check_build_flags.py      # exit 0 = all flags valid, 1 = problems listed
+.venv/bin/python scripts/check_build_flags.py      # exit 0 = all flags accepted, 1 = problems listed
 ```
 Typical output:
 ```
-Nuitka 4.3 accepts 216 long options
-Linux    22 args -> ok
-Windows  22 args -> ok
+Nuitka 4.3
+Linux    23 args -> ok
+Windows  23 args -> ok
 
-All flags are valid for both platforms.
+All flags are accepted by Nuitka's parser for both platforms.
 ```
 
 | Name | Kind | Purpose |
 |---|---|---|
-| `PLUGIN_FLAGS` | tuple | `enable-plugin`, `enable-plugins`, `plugin-enable`: the spellings that switch on a plugin. |
-| `PLUGIN_DEPENDENT` | tuple | `noinclude-pytest-mode`, `noinclude-setuptools-mode`: options that are not in the static option table (see below). |
 | `WINDOWS_ONLY` | tuple | `windows-icon-from-ico`, `windows-company-name`, `windows-product-name`: must never appear in the Linux command. |
-| `known_options() -> set[str]` | function | Every option name in `OptionParsing.parser` and its option groups (long and short names, without dashes). |
-| `flag_name(arg) -> str \| None` | function | `"--foo=bar"` → `"foo"`; `None` for an argument that is not a `--` option (the Python path, `-m`, the script path). |
-| `check(platform_name, *, windows, known) -> list[str]` | function | Builds `build.build_command("0.1.0", windows=windows)` and returns a list of problems (empty = fine); prints one summary line. |
-| `main() -> int` | function | Runs `check` for Linux and Windows plus the regression and version checks; prints the problems; returns 0 or 1. |
+| `PLUGIN_FLAG_PREFIXES` | tuple | `--enable-plugin=`, `--enable-plugins=`, `--plugin-enable=`: how the command names the plugins whose options must be registered. |
+| `fresh_parser(cmd)` | function | A new Nuitka parser set up the way `python -m nuitka` sets it up for `cmd`: built-in options, the always-on plugins' options, and the options of every plugin `cmd` enables. |
+| `rejected_flags(cmd) -> list[str]` | function | Parses each `--` flag of `cmd` on its own with that parser; returns those the parser refuses (its error text is swallowed). |
+| `flag_name(arg) -> str \| None` | function | `"--foo=bar"` → `"foo"`; `None` for an argument that is not a `--` option. |
+| `check(platform_name, *, windows) -> list[str]` | function | Builds `build.build_command("0.1.0", windows=windows)`, returns its problems (empty = fine), prints one summary line. |
+| `main() -> int` | function | Runs `check` for Linux and Windows plus the version check; returns 0 or 1. |
 
 ## How it works
-1. **Imports.** It puts `src/` and `scripts/` on `sys.path` and imports `build` as a module (the module under test). Importing `nuitka.options.OptionParsing` builds Nuitka's real `optparse` parser with every built-in option registered.
-2. **`check` per platform.**
-   - Every flag name must be in `known`. Exceptions: the plugin flags and the plugin-dependent `--noinclude-*-mode` options, which are accepted **only if a plugin flag is also present** in the same command.
-   - **Windows:** `--windows-icon-from-ico` and `--windows-console-mode` must both be present (the icon of the `.exe`, and stdout reaching a terminal for the smoke test).
+1. **Imports.** It puts `src/` and `scripts/` on `sys.path` and imports `build` (the module under test).
+2. **A parser per command line (`fresh_parser`).** Nuitka's parser is module state, created when `nuitka.options.OptionParsing` is imported, so each check reloads that module to get a clean one. Then, like Nuitka itself:
+   - `addStandardPluginCommandLineOptions` adds the options of the always-on plugins (e.g. anti-bloat's `--noinclude-pytest-mode`);
+   - `addPluginCommandLineOptions` adds the options of each plugin the command enables (`--enable-plugin=pyside6` brings `--noinclude-qt-plugins`).
+3. **Parse each flag (`rejected_flags`).** Every `--` argument is parsed alone, as `parser.parse_args([flag, "main.py"])`. `optparse` exits with code 2 on an unknown option or a bad value for a choice option; that exit is caught and the flag reported. Because the real parser is used, its rules come for free: an unambiguous prefix is accepted (`--enable-plugin` is `--enable-plugins`), and a plugin option is rejected when its plugin is not enabled.
+4. **Platform rules (`check`).**
+   - **Windows:** `--windows-icon-from-ico` and `--windows-console-mode` must both be present (the `.exe` icon, and stdout reaching a terminal).
    - **Linux:** none of `WINDOWS_ONLY` may appear, and the console flag must be exactly `--windows-console-mode=disable`.
-3. **`main` extras.**
-   - **Regression guard:** `--cache-dir` and `--no-console` must never come back. Neither is a Nuitka option; each cost a 20-minute build before this script existed. (They would also fail the "unknown option" check; the guard gives a clearer message.)
-   - **Version wiring:** `--file-version` and `--product-version` must carry the version passed to `build_command` (`"0.1.0"`); a broken version string is otherwise only noticed late in a build.
+5. **Version wiring (`main`).** `--file-version` and `--product-version` must carry the version given to `build_command`; a broken version string is otherwise only noticed late in a build.
 
 ### Why the plugin options are special
-Two things are not visible in Nuitka's static option table, so a naive "is every flag in the table?" check would reject the committed, working command:
+Plugin options are not in Nuitka's static option table; they are added to the parser while a command line is processed. The first version of this script modelled that by hand (a list of names "valid only if a plugin flag is present"), which was both stricter than Nuitka (anti-bloat is always on, so its options need no plugin flag) and blind to new plugin options. Parsing with a parser set up exactly as Nuitka sets it up replaced that model.
 
-- **`--enable-plugin`** (singular, the form in the docs and in `build.py`) is not a registered name: the table has `--enable-plugins` and `--plugin-enable`. Nuitka accepts `--enable-plugin` because its parser (like `optparse`) accepts an **unambiguous prefix** of a long option, and it also scans `sys.argv` for `--enable-plugin=` to load the named plugin's own options.
-- **`--noinclude-pytest-mode` / `--noinclude-setuptools-mode`** belong to Nuitka's **anti-bloat** plugin. Plugin options are added to the parser only while the command line is parsed, by `addStandardPluginCommandLineOptions` (in `nuitka/plugins/Plugins.py`); merely importing `OptionParsing` does not add them.
-
-The script models both by accepting these names only when a plugin flag is present. Its docstring says the `--noinclude-*` options are valid "*because* the plugin flag is passed". Reading Nuitka 4.3's source for this page shows that is **stricter than Nuitka**: anti-bloat is an *always-enabled* plugin (`isAlwaysEnabled()` returns `True`), and `addStandardPluginCommandLineOptions` adds the options of always-enabled plugins on every parse, with or without `--enable-plugin`. So the rule can only produce a false alarm (if the PySide6 plugin flag were dropped, which would break the app anyway), never miss a real error. The code's behaviour is fine; its explanation is slightly inaccurate.
+One trap had to be handled: Nuitka remembers, in the module-level dict `nuitka.plugins.Plugins.plugin_options`, every plugin whose options it has registered, and skips it next time. The second fresh parser (the Windows check, run after the Linux one) therefore received **no** plugin options and "rejected" three valid flags. `fresh_parser` clears that dict first; the test `test_committed_command_lines_are_valid` runs Linux, Windows, Linux to keep it fixed.
 
 ### Why `--windows-console-mode` is allowed on Linux
-Nuitka accepts `--windows-console-mode` on every platform; on a non-Windows host it only logs "Using OS specific option … has no effect" (`_warnOSSpecificOption`). What really must not appear in a Linux build is `--windows-icon-from-ico`, which points at a Windows-only resource. An earlier idea, "no `--windows-` flag on Linux", would therefore have been wrong; the script checks the specific flags instead.
+Nuitka accepts `--windows-console-mode` on every platform; on a non-Windows host it only logs that the option has no effect. What must not appear in a Linux build is `--windows-icon-from-ico`, which points at a Windows-only resource, so the script checks specific flags rather than banning every `--windows-` flag.
 
 ## Invariants & gotchas
 - **Run it after every change to `scripts/build.py`.** It is the cheap check; the build is the expensive one.
-- It validates **names**, not values: a wrong path or a wrong plugin name (`--enable-plugin=pyside7`) passes here and fails in Nuitka. Only the console-mode value and the version values are checked.
-- It is stricter than Nuitka for abbreviations: an unambiguous shortened flag (say `--assume-yes`) would be accepted by Nuitka but is reported here as unknown. `--enable-plugin` is the one abbreviation it knows about. Write every other flag in full.
-- It needs `nuitka` installed (`packaging/build-requirements.txt`); the test file therefore also needs it, and it is in the project venv.
-- The first line reports the version through `nuitka.Version.getNuitkaVersion()`, because `nuitka` has no `__version__` attribute (an earlier version printed `Nuitka unknown`).
+- It checks that Nuitka's **parser** accepts each flag, not that the value makes sense: a wrong path passes here and fails in the build. A misspelt plugin name (`--enable-plugin=pyside7`) is caught, because registering that plugin's options fails.
+- Each flag is parsed alone, so a flag that is only invalid in combination with another (two conflicting modes) is not detected.
+- It needs `nuitka` installed (`packaging/build-requirements.txt`); so does its test file. Both are in the project venv.
+- The version line comes from `nuitka.Version.getNuitkaVersion()`; `nuitka` has no `__version__` attribute.
 
 ## Tests
-- `tests/core/test_check_build_flags.py` ([page](../tests/core/test_check_build_flags.md)): the committed command lines pass for both platforms; each historical mistake injected into the command is caught (`--cache-dir`, `--no-console`, a Windows icon flag in the Linux build, an invented flag); dropping `--enable-plugin` is reported.
+- `tests/core/test_check_build_flags.py` ([page](../tests/core/test_check_build_flags.md)): the committed command lines pass for both platforms, in the order Linux, Windows, Linux (guards the stale plugin registry); four bad flags injected into the command are rejected on both platforms (`--cache-dir`, `--no-console`, a misspelt option, an invented one); a Windows icon flag in the Linux command is reported; dropping `--enable-plugin` makes `--noinclude-qt-plugins` invalid; `--enable-plugin` is accepted as a prefix.
 
 ## History
 - `a2e41d0` (M5): added after four flag mistakes had each cost a full build ([dev log, Milestone 5](../../04-development-log.md#four-wrong-flags-four-lost-builds)).
 - `7bac56c` (M5): run in the build workflow before the build.
+- `bb955b2` (M5): version line fixed (`Nuitka unknown`).
+- `866533e` (M5): rewritten to parse with Nuitka's own parser (plugin options included) instead of a hand-made list of option names; fixed the stale `plugin_options` registry that made the second check reject valid flags.
