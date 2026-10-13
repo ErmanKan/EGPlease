@@ -28,19 +28,32 @@ def _arm_smoke_exit(app, win, expect_file: bool, timeout_ms: int = 30_000) -> No
         if not expect_file or loaded or failed or clock.elapsed() > timeout_ms:
             timer.stop()
             if not expect_file:
-                print("GUI OK window shown")
+                print("GUI OK window shown", flush=True)
                 app.exit(0)
             elif loaded:
                 meta = win.doc.meta
-                print(f"GUI OK opened {meta.frame_count} frames {meta.width}x{meta.height}")
+                print(
+                    f"GUI OK opened {meta.frame_count} frames {meta.width}x{meta.height}",
+                    flush=True,
+                )
                 app.exit(0)
             else:
                 reason = win.last_error or "timed out"
-                print("GUI FAIL " + reason.replace("\n", " "))
+                print("GUI FAIL " + reason.replace("\n", " "), flush=True)
                 app.exit(1)
 
     timer.timeout.connect(poll)
     timer.start(50)
+
+
+def _stage(smoke: bool, name: str) -> None:
+    """In smoke mode, print a start-up stage marker and flush it at once.
+
+    A hard crash (Windows access violation) discards buffered stdout, so without the flush a
+    crash after "GUI OK" looks the same as a crash before the window exists.
+    """
+    if smoke:
+        print(f"GUI STAGE {name}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +72,17 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_edit_spec(source, spec)
 
+    smoke = "--smoke-gui" in args
+    if smoke:
+        # On a native crash, dump the Python stack of every thread to stderr.
+        import contextlib
+        import faulthandler
+
+        # stderr may not be a real file (no console, or a test harness replaced it; then
+        # io.UnsupportedOperation, an OSError). The stage markers still locate a crash.
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            faulthandler.enable(all_threads=True)
+    _stage(smoke, "importing Qt")
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -67,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     from gif_editor.resources import icon_path
     from gif_editor.ui.main_window import APP_NAME, MainWindow
 
+    _stage(smoke, "creating QApplication")
     app = QApplication.instance() or QApplication(args)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
@@ -75,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     # executable's Windows resource, but that only covers Explorer, not the running window.
     icon = icon_path()
     if icon is not None:
+        _stage(smoke, "loading window icon")
         app.setWindowIcon(QIcon(str(icon)))
+    _stage(smoke, "self-test")
 
     # We rely on undocumented Pillow internals (pinned version). Fail loudly, not subtly.
     try:
@@ -101,9 +128,10 @@ def main(argv: list[str] | None = None) -> int:
         box.exec()
         return 1
 
+    _stage(smoke, "creating main window")
     win = MainWindow()
+    _stage(smoke, "showing main window")
     win.show()
-    smoke = "--smoke-gui" in args
     files = [a for a in args[1:] if not a.startswith("--")]
     if files:
         win.open_file(files[0])
@@ -112,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         # decoder and canvas all run, then the app quits by itself with a status code. The
         # --edit-spec path proves the core; this one proves the Qt half of the bundle.
         _arm_smoke_exit(app, win, bool(files))
+    _stage(smoke, "event loop")
     code = app.exec()
+    _stage(smoke, f"event loop ended ({code}), waiting for background tasks")
     # A background task (opening a file, a preview render, the size estimate) may still be
     # running when the window closes. Let it finish before Python shuts down: interpreter
     # teardown under a running pool thread can crash on exit. Tasks are short; the timeout
@@ -120,4 +150,5 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import QThreadPool
 
     QThreadPool.globalInstance().waitForDone(10_000)
+    _stage(smoke, "exiting")
     return code

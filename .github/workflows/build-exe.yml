@@ -41,12 +41,16 @@ jobs:
         run: python scripts/check_build_flags.py
 
       - name: Build the single-file executable
+        id: build
         run: python scripts/build.py
 
       - name: Smoke-test the built executable
         run: python scripts/smoke_build.py out/dist/GifEditor.exe
 
+      # Uploaded even if the smoke test fails: the offscreen smoke run is not the same as a
+      # real desktop, so a failing build is still worth trying by hand.
       - name: Upload the executable
+        if: always() && steps.build.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: GifEditor-windows

@@ -53,15 +53,60 @@ def make_fixture(path: Path, frames: int = 8) -> None:
     make_gif(path, solid_frames(frames, (64, 48)), 100)
 
 
+def exit_text(code: int) -> str:
+    """``3221225477`` -> ``3221225477 (0xC0000005 access violation)``: Windows crash codes."""
+    names = {
+        0xC0000005: "access violation",
+        0xC0000409: "stack buffer overrun / abort",
+        0xC0000135: "DLL not found",
+        0xC000007B: "bad DLL image",
+    }
+    u = code & 0xFFFFFFFF
+    return f"{code} (0x{u:08X} {names[u]})" if u in names else str(code)
+
+
 def run(
-    binary: Path, args: list[str], workdir: Path, timeout: int = 120
+    binary: Path,
+    args: list[str],
+    workdir: Path,
+    timeout: int = 120,
+    platform: str | None = "offscreen",
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"  # headless: no display in this container or CI
+    env.pop("QT_QPA_PLATFORM", None)
+    if platform:
+        env["QT_QPA_PLATFORM"] = platform  # headless: no display in this container or CI
+    env.update(extra_env or {})
     env["TMPDIR"] = str(workdir)  # onefile unpacks + execs here, so it must be executable
     return subprocess.run(
         [str(binary), *args], cwd=workdir, env=env, capture_output=True, text=True, timeout=timeout
     )
+
+
+def diagnose_gui(run_bin: Path, src: Path, work: Path) -> None:
+    """Step 3 failed: rerun it in variants and print everything, to locate the failure.
+
+    Diagnostics only; they never change the verdict. Variants: the window without a file
+    (is it the GIF loading?), Qt's plugin-loading log (is it a plugin?), and on Windows the
+    native platform instead of offscreen (is it the offscreen plugin?).
+    """
+    variants = [
+        ("no file", ["--smoke-gui"], "offscreen", {}),
+        ("QT_DEBUG_PLUGINS=1", ["--smoke-gui", str(src)], "offscreen", {"QT_DEBUG_PLUGINS": "1"}),
+    ]
+    if sys.platform == "win32":
+        variants.append(("native windows platform", ["--smoke-gui", str(src)], None, {}))
+    for label, args, platform, extra in variants:
+        try:
+            res = run(run_bin, args, work, timeout=90, platform=platform, extra_env=extra)
+        except subprocess.TimeoutExpired:
+            print(f"\n--- diagnostic: {label}: timed out")
+            continue
+        lines = [ln for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
+        print(f"\n--- diagnostic: {label}: exit={exit_text(res.returncode)}")
+        for ln in lines[-80:]:
+            print("    " + ln)
 
 
 def main() -> int:
@@ -78,9 +123,10 @@ def main() -> int:
     def record(step: str, ok: bool, res: subprocess.CompletedProcess, extra: str = "") -> None:
         lines = [ln for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
         shown = next((ln for ln in lines if ln.startswith(("RESULT", "ERROR", "GUI"))), "")
-        print(f"{step:22s} exit={res.returncode} {'ok' if ok else 'FAILED'}  {shown}{extra}")
+        code = exit_text(res.returncode)
+        print(f"{step:22s} exit={code} {'ok' if ok else 'FAILED'}  {shown}{extra}")
         if not ok:
-            failures.append(f"{step}: exit {res.returncode}\n" + "\n".join(lines[-30:]))
+            failures.append(f"{step}: exit {code}\n" + "\n".join(lines[-60:]))
 
     try:
         src = work / "in.gif"
@@ -109,6 +155,8 @@ def main() -> int:
         # 3. The real window, offscreen, opens the GIF and quits by itself.
         res = run(run_bin, ["--smoke-gui", str(src)], work)
         record("3. GUI opens a GIF", res.returncode == 0, res)
+        if res.returncode != 0:
+            diagnose_gui(run_bin, src, work)
     except subprocess.TimeoutExpired as exc:
         failures.append(f"timed out after {exc.timeout} s: {exc.cmd}")
     finally:

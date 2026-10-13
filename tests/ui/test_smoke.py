@@ -69,7 +69,10 @@ def test_smoke_gui_reports_a_failed_open(qtbot, tmp_path, capsys):
     from gif_editor import app
 
     assert app.main(["gif-editor", "--smoke-gui", str(tmp_path / "missing.gif")]) == 1
-    assert capsys.readouterr().out.startswith("GUI FAIL")
+    lines = capsys.readouterr().out.splitlines()
+    assert any(ln.startswith("GUI FAIL") for ln in lines)
+    # Stage markers are printed (flushed) in smoke mode, ending at the exit.
+    assert lines[0] == "GUI STAGE importing Qt" and lines[-1] == "GUI STAGE exiting"
 
 
 def test_smoke_gui_fails_fast_on_a_broken_selftest(qtbot, monkeypatch, capsys):

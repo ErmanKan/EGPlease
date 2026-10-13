@@ -410,3 +410,12 @@ Both workflows failed at the test step: **713 passed, 2 failed, 1 skipped** on W
 - `test_cursor_and_tooltip` moved the mouse past x=800 on Qt's default 800×600 offscreen screen, so the event never arrived (the M4 HiDPI lesson again: `scripts/test.sh` had the 3840×2160 screen config, the workflows did not). Both workflows now set `QT_QPA_PLATFORM=offscreen:configfile=scripts/offscreen-screen.json`; the path is relative because Qt splits that value on `:`, which would cut a `D:\...` path.
 - Also: `ci.yml` now installs `packaging/build-requirements.txt` (the flag-checker tests import Nuitka), and the actions moved to `checkout@v7`, `setup-python@v7`, `upload-artifact@v7` (Node 24; the v4/v5 ones raised a Node 20 deprecation warning).
 - The `resource` test is skipped on Windows by design (POSIX-only module).
+
+### First Windows build (`1f292d8`): the `.exe` builds, the GUI smoke step crashes
+CI passed (all tests green on Windows). The build workflow built `GifEditor.exe` (**33.7 MB**, against 61.6 MB on Linux) and smoke steps 1 and 2 passed: the packaged core loads, edits and writes GIFs on Windows. Step 3 (`--smoke-gui`, offscreen) exited **3221225477 = 0xC0000005, an access violation**, with no output. The same code passes as plain Python in CI, so the crash is specific to the packaged build.
+
+No output does not mean an early crash: stdout to a pipe is block-buffered and a native crash discards the buffer, so a crash at exit, after `GUI OK`, would look identical. Diagnostics added instead of a guessed fix:
+- `app.py` in smoke mode prints flushed `GUI STAGE ...` markers (importing Qt, QApplication, icon, self-test, window, event loop, exit) and enables `faulthandler` when stderr is a real file;
+- `smoke_build.py` names Windows crash codes (`0xC0000005 access violation`) and, when step 3 fails, reruns it without a file, with `QT_DEBUG_PLUGINS=1`, and on Windows with the native platform instead of offscreen, printing all output;
+- the workflow uploads the `.exe` even when the smoke step fails, so it can be tried on a real desktop.
+
