@@ -2,7 +2,7 @@
 
 Offline Windows desktop GIF editor (Python 3.13 + PySide6). Load a GIF, scrub it frame by frame, trim, delete frames, crop with a draggable rectangle, change speed / FPS / size / quality, then **Generate** a new GIF. Ships as a single portable `GifEditor.exe` (Nuitka onefile).
 
-Status: **Milestones 1–4 done** (core engine; window and inspector; crop and live preview; hardening). Next: **M5, the single `.exe`** (see [docs/02-plan.md](docs/02-plan.md#6-milestones) and [docs/RESUME-HERE.md](docs/RESUME-HERE.md)).
+Status: **Milestones 1–4 done** (core engine; window and inspector; crop and live preview; hardening). **M5, the single `.exe`, is in progress:** the build recipe, icon, checks and the Windows build workflow exist and the recipe was proven with a Linux build, but `GifEditor.exe` has not been built and tested on Windows yet (see [docs/04-development-log.md](docs/04-development-log.md#milestone-5-packaging) and [docs/RESUME-HERE.md](docs/RESUME-HERE.md)).
 
 ## Features (working today)
 - **Open** a GIF from File → Open, the command line, or by dragging it onto the window. Decoding runs in the background, with browser-correct disposal and transparency; damaged files load as far as possible, with a warning.
@@ -25,7 +25,7 @@ Status: **Milestones 1–4 done** (core engine; window and inspector; crop and l
 - **Errors in plain words** (M4): a dialog says what happened and what to do ("this file is not a GIF", "it is damaged; 2 frames could be loaded", "that file is open in another program"), with the technical text behind **Show Details...**. A failed or cancelled Generate always reports that the destination file is unchanged.
 - **Fits your screen** (M4): the window opens at most 90 % of the screen and centred, so it is usable on a 1080p laptop at 150 % scaling; **Generate** is pinned below the settings and never needs scrolling. Every field's tooltip (and screen-reader description) states its range and why — e.g. why FPS stops at 50.
 - **Stays responsive on large GIFs** (M4): opening, playback, scrubbing, previewing and Generate all run off the GUI thread; a frame that would take too long to decode is fetched in the background instead of freezing the window.
-- Not yet: the `.exe` build (M5).
+- In progress: the `.exe` build (M5), see [Build the .exe](#build-the-exe).
 
 ## Run
 
@@ -35,6 +35,29 @@ py -3.13 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 $env:PYTHONPATH="src"; .venv\Scripts\python -m gif_editor [file.gif]
 ```
+
+## Build the .exe
+
+Nuitka compiles to C and cannot cross-compile, so `GifEditor.exe` is built **on Windows**: on your PC, or by GitHub Actions.
+
+**On your Windows PC** (PowerShell, from the repo root; the first build takes a long time: Nuitka compiles Python, the Qt bindings, Pillow and numpy to C, and may download a C compiler on first use):
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt -r packaging/build-requirements.txt
+.venv\Scripts\python scripts\build.py
+.venv\Scripts\python scripts\smoke_build.py out\dist\GifEditor.exe
+```
+The result is `out\dist\GifEditor.exe`, one file with everything inside. The smoke test must end with `OK: …`. If you changed `scripts\build.py`, run `.venv\Scripts\python scripts\check_build_flags.py` first (one second instead of a failed build).
+
+**From GitHub Actions** (once the repo is on GitHub): Actions → **Build GifEditor.exe** → **Run workflow** (or push a tag like `v0.1.0`). The job tests, builds and smoke-tests the `.exe`; when it is green, download the artifact **`GifEditor-windows`** (a zip with `GifEditor.exe`) from the run's page. Artifacts are kept for 30 days.
+
+The `.exe` unpacks itself into your temp folder when it starts and never writes next to itself, so it can run from any folder or a USB stick. It is not code-signed, so Windows SmartScreen may warn the first time.
+
+**Hidden headless mode** (for the smoke test and scripting; no window, no Qt):
+```powershell
+GifEditor.exe --edit-spec in.gif "trim=0:400,delete=0:3,crop=8:6:40:30,size=32x24,colors=64,out=out.gif"
+```
+Items are comma-separated `key=value`; lists use colons (`delete=0:3:5`); whole numbers are milliseconds, decimals are seconds (`trim=0.5:1.5`). It prints one `RESULT …` or `ERROR …` line and exits 0 or 1. Full grammar: [headless page](docs/codebase/src/gif_editor/headless.md).
 
 ## Check
 
@@ -51,6 +74,8 @@ scripts/test.sh tests/ui -k trim   # extra arguments go to pytest
 scripts/test-hidpi.sh              # the UI tests at 150 % and 200 % scaling
 PYTHONPATH=src:tests .venv/bin/python scripts/stress_probe.py    # GUI-thread stalls on big/broken GIFs
 PYTHONPATH=src:tests .venv/bin/python scripts/fuzz_decoder.py    # damaged-file fuzz (loads or refuses cleanly)
+.venv/bin/python scripts/check_build_flags.py   # every Nuitka flag in scripts/build.py is real (~1 s)
+.venv/bin/python scripts/make_icon.py --check  # committed icons match the generator (pixels)
 ```
 
 ## Keyboard shortcuts

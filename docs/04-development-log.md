@@ -300,3 +300,95 @@ Recorded so they are not repeated:
 
 ### Documentation pass (end of M4)
 New pages for `ui/messages.py`, `tests/ui/test_messages.py`, `scripts/test-hidpi.sh`, `scripts/stress_probe.py` and `scripts/fuzz_decoder.py`; `offscreen-screen.json` added to the config page; the workers, decoder, canvas, main window, settings panel, app, `test.sh`, UI conftest and test pages updated; the architecture page's threading section rewritten and an error-flow section added; this section; the testing guide (HiDPI, fuzz, stress, soak, temp-dir policy); README, RESUME-HERE and AGENTS.md describe the state after M4. Stale test counts on two older pages (`test_estimate`, `test_m3_integration`) were corrected on the way.
+
+## Milestone 5: Packaging
+
+Goal (from [02-plan.md §6](02-plan.md#6-milestones)): a single `GifEditor.exe` (Nuitka onefile with the PySide6 plugin), with an icon and version information, a licence bundle and a Windows CI build artifact. **Done when** the `.exe` runs on a clean Windows 11 machine with no Python installed, from any folder or a USB stick.
+
+**Status at the end of this section: in progress.** The build recipe, the icon, the checks and the CI workflow exist and were proven by building a *Linux* binary. The Windows `.exe` itself has not been produced yet, for the reason explained first below.
+
+### Commits
+| Commit | Delivered |
+|---|---|
+| `3531ca0` | `scripts/build.py` (Nuitka onefile recipe), `scripts/make_icon.py` and the generated icons, `gif_editor/resources` (`icon_path`), the hidden `--edit-spec` mode (`gif_editor/headless.py`, handled in `app.main` before any Qt import), window icon, `scripts/smoke_build.py` |
+| `4779648` | `.github/workflows/build-exe.yml` (Windows build + smoke test + artifact) and the pinned `packaging/build-requirements.txt` |
+| `c777acb` | `docs/RESUME-HERE.md` rewritten before a planned PC shutdown |
+| `a2e41d0` | Fix: `icon_path()` looked in `resources/resources` and never found the icon; `scripts/check_build_flags.py` validates every Nuitka flag for both platforms; `build_command(windows=)`; `headless` docstring fixed and `_ms` helper; tests `test_headless.py`, `test_resources.py`, `test_check_build_flags.py` |
+| `7bac56c` | Fix: the smoke test would have hung and never tested Qt; `--smoke-gui`; pass/fail by exit code and file; `make_icon.py --check` compares pixels; flag check in the build workflow |
+
+### Why there is no `.exe` yet: Nuitka cannot cross-compile
+Nuitka translates Python to C and compiles it with the target platform's C compiler, so a Windows `.exe` must be built **on Windows**. The development container is Linux with no Windows toolchain: no MSVC, no mingw, no wine. The Windows host is not executable from inside it either (its `C:` drive is visible only as inert files). So the `.exe` can come from two places only:
+1. the GitHub Actions workflow [`build-exe.yml`](codebase/config-files.md#githubworkflowsbuild-exeyml) on a `windows-latest` runner (it uploads `GifEditor-windows`), or
+2. the user's Windows PC (`python scripts\build.py`; commands in the [README](../README.md#build-the-exe)).
+
+What *was* done here: the **same recipe** was built for Linux. The result, `out/dist/GifEditor`, is an **11.5 MB** self-contained onefile whose only dynamic dependency is the C library. That proves the parts of the recipe that do not depend on the OS: the include rules, the package data (icons), the PySide6 plugin, the onefile packing. It does not prove the Windows-only parts (the `.ico` resource, console mode `attach`, Windows DLLs); those are validated by the flag checker below and, finally, by the first Windows build.
+
+### Four wrong flags, four lost builds
+A from-scratch Linux build took about **20 minutes** in the container (why it is that slow *here* is explained [below](#two-wrong-claims-about-why-the-build-was-slow); it is not the drive and not the C compiler). Four mistakes in `scripts/build.py` were each found only by running a build, before a flag checker existed; each cost about one ~20-minute build cycle:
+1. **`--cache-dir`**: not a Nuitka option; Nuitka rejected it (that build exited with code 2). Nuitka's cache location is set with the `NUITKA_CACHE_DIR` environment variable, not a flag.
+2. **`--no-console`**: not a Nuitka option either (rejected the same way). The real one is `--windows-console-mode=…` (`attach` on Windows: output reaches a terminal if started from one, no console window otherwise).
+3. **Missing `--include-package=gif_editor`**: pointed only at `__main__.py`, Nuitka compiled happily, but the binary died at start with `No module named 'gif_editor.app'`. This one cost a *full* compile plus a run.
+4. **Missing `PYTHONPATH` for `--include-package`**: the option is resolved through the build interpreter's import path, which does not contain `src/` (the app is never installed). Nuitka stopped with "failed to locate package". `build.py` now sets `PYTHONPATH=src` for the Nuitka child process.
+
+A fifth flag was removed rather than fixed: `--onefile-tempdir-spec` with `{TEMP_DIR}`. That variable does not exist (Nuitka's is `{TEMP}`), and the default already unpacks into the user's temp folder, which is exactly what we want: the `.exe` never writes next to itself, so it works from a read-only folder or a USB stick.
+
+**The fix for the process** (`a2e41d0`): [`scripts/check_build_flags.py`](codebase/scripts/check_build_flags.md) imports Nuitka's own option parser and checks every flag of both the Linux and the Windows command line in about a second. `build_command` gained a `windows=` parameter for that, so the Windows command can be checked on Linux. Two details had to be modelled: `--enable-plugin` (the documented spelling) is accepted by Nuitka as an abbreviation of `--enable-plugins`, and the `--noinclude-*-mode` options are registered only while a command line is parsed, so neither is in the static table. `--windows-console-mode` turned out to be accepted on every platform (Nuitka only warns); the truly Windows-only flag is `--windows-icon-from-ico`. Its test injects each historical mistake and checks it is caught. AGENTS.md now says: run the checker after touching `build.py`. (Re-reading Nuitka 4.3's source for the docs pass showed that the checker's rule for `--noinclude-*-mode` is stricter than Nuitka needs; see the [checker page](codebase/scripts/check_build_flags.md#why-the-plugin-options-are-special). It can only cause a false alarm, never miss an error.)
+
+### The icon that never loaded
+`gif_editor/resources/__init__.py` resolves bundled files. Its first version took the folder of `__file__` (which already *is* `resources/`) and appended `"resources"` again, so it looked in `resources/resources/icons/`. Because the helper is designed never to raise (a missing icon must not stop the app), nothing failed: `icon_path()` returned `None` and the app **never set its window icon**, from source or in a build. The new `tests/core/test_resources.py` caught it the first time it ran. Fixed in `a2e41d0`; after the fix the application's window icon was verified to be non-null. Lesson: a helper that hides failures needs a test that the normal case actually finds something.
+
+### The smoke test would have hung
+`scripts/smoke_build.py` runs a built binary as a child process. Its first version (`3531ca0`) was written while no binary existed yet. Reading it again **before its first real run** found two faults:
+1. **It would have hung.** Its first step started the binary with a missing file and expected exit code 1. But that starts the **GUI**: the window opens, shows its "can't open file" dialog, and keeps running until someone closes it. Nobody would.
+2. **It never exercised Qt.** Its other step used `--edit-spec`, which by design returns before anything imports Qt. A binary missing its Qt platform plugin, the most likely packaging failure, would have passed.
+
+The rewrite (`7bac56c`) has three steps: a missing file through `--edit-spec` (exit 1, no traceback); a real edit (exit 0 and a 32×24 GIF on disk); and the new **`--smoke-gui`** flag, which starts the real window offscreen, opens the GIF and makes the app quit by itself with exit code 0 or 1 (`app._arm_smoke_exit` polls every 50 ms, 30 s timeout). It also stopped depending on printed output: a Windows GUI executable with console mode `attach` may not deliver stdout to a pipe, so pass/fail is decided by **exit codes and the written file only**; the printed `RESULT`/`GUI OK` lines are diagnostics.
+
+### The icon and its check
+The icon is generated by [`scripts/make_icon.py`](codebase/scripts/make_icon.md): a dark rounded plate with a white play triangle, plus green film sprockets from 48 px up. Small sizes (≤ 32 px) are **drawn as a simplified design**, not scaled down: at 16 px the detailed design came out as a featureless dark square. Every size is drawn at 4× and reduced (anti-aliased edges), and `icon.ico` holds 16, 24, 32, 48, 64, 128 and 256 px.
+
+The first CI step regenerated the icons and failed on `git diff`. That compares **bytes**, and PNG/ICO bytes depend on the zlib inside Pillow's wheel, which differs between Windows and Linux, so a Windows runner could fail on pixel-identical files. `make_icon.py --check` (`7bac56c`) compares **decoded pixels** instead; a deliberate 1-pixel change was verified to be caught.
+
+### The headless `--edit-spec` mode
+`GifEditor --edit-spec IN.gif "trim=0:400,delete=2,crop=8:6:40:30,size=32x24,out=OUT.gif"` runs one edit and Generate with no window and prints `RESULT …` or `ERROR …` ([headless page](codebase/src/gif_editor/headless.md)). It exists so a packaged build can be checked automatically, and it runs exactly the GUI's Generate code. `app.main` handles it **before any Qt import**: importing Qt loads `libEGL` and a platform plugin, and this path must work on a bare server. The first docstring documented `delete=0,3,5`, which the grammar cannot express (commas separate items; lists use colons: `delete=0:3:5`); it was noticed while writing `tests/core/test_headless.py` and fixed in `a2e41d0`, together with rounding instead of truncating when a decimal (seconds) is converted to milliseconds.
+
+### Container quirks
+- **`patchelf`.** Nuitka's onefile mode on Linux needs the `patchelf` tool. Installing it system-wide would break the hard rule, so it is installed **project-locally** as the pinned wheel `patchelf==0.19.1.0` in the venv (and listed in `packaging/build-requirements.txt` for non-Windows only). A local build needs `.venv/bin` on `PATH`.
+- **`noexec` mounts.** `/tmp`, `/dev/shm`, `/var/tmp` and the project drive are mounted `noexec` in the container. A onefile binary unpacks itself into `TMPDIR` and executes the unpacked program, so in the container it only runs with `TMPDIR` pointed at an executable folder under `$HOME`. This affects only the container; Windows and CI need nothing.
+
+### Two wrong claims about why the build was slow
+The Linux builds in the container took about 20 minutes. The orchestrator explained this wrongly **twice**; both explanations are recorded here because they were stated as facts.
+
+**Wrong claim 1: "the `F:` drive is slow."** The orchestrator blamed the project's `F:` drive (a Windows drive mounted into the container). **The user challenged this, and a measurement showed it was wrong.** Writing and reading 300 small files took **636 ms** on the project drive vs **655 ms** on the container's own disk; sequential throughput was **247 MB/s** vs **207 MB/s**. The drive is not slow.
+
+**Wrong claim 2: "it is the C compile plus the rebuilds."** The orchestrator's replacement explanation was not measured either, and it was also wrong. **Profiling the running build** showed that during the slow phase **no compiler runs at all**. The time goes into Nuitka's Linux dependency scan:
+- for every shared library it bundles (**269 `.so` files** in PySide6 alone) Nuitka runs `ldd` once, with an `LD_LIBRARY_PATH` of **104 directories** that it builds itself;
+- `ldd` on one Qt plugin (`libqtga.so`) took **30 ms** with no `LD_LIBRARY_PATH`, **4.4 s** with Nuitka's 104-directory path on the `F:` drive, and **5.9 s** with 104 *empty* directories on the container's own disk;
+- the cause is failed file lookups: `ldd` tries each needed library in each of the 104 directories, and a lookup that finds nothing costs **158 µs** on `F:` but **1,054 µs** on the container's own disk (Docker overlayfs with about 20 lower layers, where every miss is checked in each layer).
+
+So the slow part is (number of libraries) × (104 directories × each library they need) × (slow negative lookups in this container). It is neither the `F:` drive (which is actually the *faster* place for these misses) nor the compiler. **On Windows, Nuitka uses its own DLL dependency walker instead of `ldd`**, so CI and the user's PC do not hit this.
+
+Lesson: measure before explaining, and an explanation that replaces a refuted one needs a measurement too. This also puts a question mark on the M4 explanation that the test suite slowed from about 15 s to 38 s *because* its temp files moved onto the mounted drive; that explanation was never measured in the same way and has not been re-checked.
+
+### A test that is flaky under load
+One full-suite run made *during* a Nuitka build failed `tests/core/test_timeline.py::test_performance_10k_frames`, which asserts that planning 10,000 frames takes under **50 ms** of wall-clock time. The machine's load average was **4.7** (normally about 1.7) because of the running build. It passes alone and in every other run. It is a known **flaky-under-load** test: if CI ever reports it, check the runner's load before suspecting the timeline code.
+
+### The PC shutdown mid-milestone
+The user's PC had to be shut down in the middle of M5. Before that, all work was committed and `docs/RESUME-HERE.md` was rewritten (`c777acb`) with the state, the next steps and the container quirks, so the work could be resumed without the conversation history (the same procedure as in M3).
+
+### Verification
+- Full suite: **709 passed + 2 xfailed** (679 from M4, plus 19 + 5 + 6 new); ruff format and lint clean.
+- `scripts/check_build_flags.py`: Linux and Windows command lines valid (22 arguments each).
+- `scripts/make_icon.py --check`: icons up to date.
+- Linux onefile build of the same recipe: 11.5 MB, only libc dynamic.
+
+LINUX BINARY SMOKE RESULT: pending (filled in by the orchestrator)
+
+### Still open for M5
+- **The exit criterion is not met yet:** `GifEditor.exe` has never been built or run. Next: run `build-exe.yml` (or build on the user's PC), then run the `.exe` on a **clean Windows 11 VM without Python**, from a normal folder and from a USB stick.
+- **Licence bundle:** `packaging/licenses/` contains only a `.gitkeep`. The `.exe` bundles Python, Qt/PySide6 (LGPL), Pillow, numpy and others, whose licence texts must ship with it.
+- **Code signing:** optional (plan §6); an unsigned `.exe` will trigger Windows SmartScreen warnings on other people's machines.
+- Small code fixes noticed during the docs pass (code was not changed in that pass): `build.py`'s docstring mentions a cache under `out/nuitka-build/` that does not exist; `check_build_flags.py` prints `Nuitka unknown` instead of the version.
+
+### Documentation pass (M5)
+New pages for `scripts/build.py`, `check_build_flags.py`, `make_icon.py`, `smoke_build.py`, `gif_editor/headless.py`, `gif_editor/resources/__init__.py` and the three new test files; the icons, `packaging/build-requirements.txt` and `build-exe.yml` added to the config page; the `app.py` page updated (`--edit-spec`, window icon, `--smoke-gui`, file argument); INDEX rows (and two missing page links fixed); this section; the testing guide (build checks, smoke test, the `TMPDIR` note); README (status, *Build the .exe*), AGENTS.md (M5 interfaces and rules) and the architecture tree.

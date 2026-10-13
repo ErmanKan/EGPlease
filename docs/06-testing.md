@@ -1,8 +1,8 @@
 # 06 — Testing
 
-How the tests are organised, how to run them here and on Windows, how GIF fixtures are generated, how headless Qt works in the dev container, and the manual hardening tools (HiDPI pass, decoder fuzzer, stress probe, soak runs).
+How the tests are organised, how to run them here and on Windows, how GIF fixtures are generated, how headless Qt works in the dev container, the manual hardening tools (HiDPI pass, decoder fuzzer, stress probe, soak runs), and the packaging checks (flag check, icon check, build + smoke test).
 
-Current state (end of Milestone 4): **681 tests, 679 passed, 2 xfailed** (`scripts/test.sh`, about 39 s); the 278 UI tests also pass at 150 % and 200 % scaling (`scripts/test-hidpi.sh`). Soak result: see [the soak section](#soak-test-repeated-full-runs).
+Current state (Milestone 5, in progress): **711 tests, 709 passed, 2 xfailed** (`scripts/test.sh`, about 37–40 s); M5 added 30 core tests (`test_headless.py` 19, `test_resources.py` 5, `test_check_build_flags.py` 6). The 278 UI tests also pass at 150 % and 200 % scaling (`scripts/test-hidpi.sh`, measured at the end of M4). Soak result (M4): see [the soak section](#soak-test-repeated-full-runs). Packaging checks: see [below](#packaging-checks-m5).
 
 ## Running the tests
 
@@ -30,6 +30,41 @@ The fuzzer exits 1 if any damaged file raised something other than `GifLoadError
 
 `pyproject.toml` sets `pythonpath = ["src", "tests"]` (no install needed; helper modules import as `corpus`/`gifgen`), `testpaths = ["tests"]` and `addopts = "-ra"`, which prints the reason for every xfail and skip.
 
+## Packaging checks (M5)
+
+Three checks protect the `.exe` build. The first two are fast and run in the container; the build itself is slow (about 20 minutes from scratch in the container, mostly Nuitka's `ldd`-based dependency scan; see the [dev log](04-development-log.md#two-wrong-claims-about-why-the-build-was-slow)).
+
+| Check | Command (repo root) | What it proves | Page |
+|---|---|---|---|
+| Nuitka flags | `.venv/bin/python scripts/check_build_flags.py` | Every flag `scripts/build.py` passes is a real Nuitka 4.3 option, for the Linux **and** the Windows command line; `--cache-dir`/`--no-console` never come back; the version reaches the file metadata. ~1 s. **Run it after every change to `build.py`.** | [check_build_flags](codebase/scripts/check_build_flags.md) |
+| Icons current | `.venv/bin/python scripts/make_icon.py --check` | The committed icon PNGs have exactly the pixels `make_icon.py` draws now, and `icon.ico` has the 7 sizes. Compares pixels, not bytes (zlib output differs per OS). | [make_icon](codebase/scripts/make_icon.md) |
+| Build + smoke test | `.venv/bin/python scripts/build.py`, then `.venv/bin/python scripts/smoke_build.py [binary]` | The binary fails cleanly on a missing file (exit 1, no traceback), performs a real edit and writes a 32×24 GIF (exit 0), and opens a GIF in its real window offscreen and quits (`--smoke-gui`, exit 0). | [build](codebase/scripts/build.md), [smoke_build](codebase/scripts/smoke_build.md) |
+
+The unit tests `test_check_build_flags.py` (the checker catches each historical mistake), `test_headless.py` (the `--edit-spec` grammar the smoke test relies on) and `test_resources.py` (the icon is found) run in the normal suite.
+
+**On Windows / in CI** the build workflow [`build-exe.yml`](codebase/config-files.md#githubworkflowsbuild-exeyml) runs, in order: lint + tests, `make_icon.py --check`, `check_build_flags.py`, `build.py`, `smoke_build.py out/dist/GifEditor.exe`, then uploads the `.exe`. Locally on Windows:
+```powershell
+.venv\Scripts\python -m pip install -r requirements-dev.txt -r packaging/build-requirements.txt
+.venv\Scripts\python scripts\check_build_flags.py
+.venv\Scripts\python scripts\build.py
+.venv\Scripts\python scripts\smoke_build.py out\dist\GifEditor.exe
+```
+
+**In the Linux container** (proves the recipe with a Linux binary; it cannot make a `.exe`):
+```bash
+PATH=$PWD/.venv/bin:$PATH .venv/bin/python scripts/build.py      # patchelf comes from the venv
+mkdir -p "$HOME/smoke-tmp"
+TMPDIR="$HOME/smoke-tmp" .venv/bin/python scripts/smoke_build.py out/dist/GifEditor
+```
+*The `TMPDIR` note:* a onefile binary unpacks itself into `TMPDIR` and executes the unpacked program. In this container `/tmp`, `/dev/shm`, `/var/tmp` and the project drive are mounted `noexec`, so with the default `TMPDIR` the binary cannot start. Point `TMPDIR` at an executable folder under `$HOME` (outside the repo, so delete it when done). This is a container quirk; Windows and CI need nothing. Do not start a build while another one is running in `out/`, and never delete `out/dist/` during a build.
+
+LINUX BINARY SMOKE RESULT: pending (filled in by the orchestrator)
+
+**Not covered by any automated check yet:** the M5 exit criterion, i.e. the `.exe` running on a clean Windows 11 machine without Python, from any folder and from a USB stick. That is a manual test on a VM.
+
+### A timing test that is flaky under load
+`tests/core/test_timeline.py::test_performance_10k_frames` asserts that planning 10,000 frames takes under **50 ms** of wall-clock time. In one full run made *during* a Nuitka build (load average 4.7 instead of about 1.7) it failed; alone, and in every other run, it passes. If it fails, check whether the machine (or CI runner) was busy before suspecting `core/timeline.py`. Avoid running the suite while a build is running.
+
 ## Test layout
 
 ```
@@ -47,7 +82,10 @@ tests/
 │  ├─ test_encoder.py       62   writer structure, lossless diffs, atomicity
 │  ├─ test_pipeline.py      24   end to end, size and flicker
 │  ├─ test_estimate.py       7   size estimate, write_stream
-│  └─ test_selftest.py       6   Pillow-internals self-test
+│  ├─ test_selftest.py       6   Pillow-internals self-test
+│  ├─ test_headless.py      19   --edit-spec grammar + a real headless run      ┐
+│  ├─ test_resources.py      5   icon/resource lookup, onefile env var        │ M5 packaging
+│  └─ test_check_build_flags.py 6 Nuitka flags valid; historical mistakes caught ┘
 └─ ui/                    pytest-qt, needs offscreen Qt
    ├─ conftest.py            _drain_workers (autouse), gif_path, doc
    ├─ test_document.py      11   Document + undo                  ┐

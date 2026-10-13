@@ -7,7 +7,7 @@
 4. Only touch the files your task owns. Shared interfaces below are a contract: do not change signatures without the orchestrator.
 
 ## Stack (pinned)
-Python 3.13 · PySide6-Essentials 6.12.0 · Pillow 12.3.0 · numpy 2.5.3 · pytest 9.1.1 · pytest-qt 4.5.0 · ruff 0.17.0 · Nuitka 4.3 onefile (release build, Windows only).
+Python 3.13 · PySide6-Essentials 6.12.0 · Pillow 12.3.0 · numpy 2.5.3 · pytest 9.1.1 · pytest-qt 4.5.0 · ruff 0.17.0 · Nuitka 4.3 onefile (release build; build-only pins in `packaging/build-requirements.txt`: nuitka 4.3, ordered-set 4.1.0, zstandard 0.25.0, patchelf 0.19.1.0 on non-Windows).
 
 ## Commands (run from repo root, inside the container)
 ```bash
@@ -17,7 +17,12 @@ scripts/test.sh                                              # lint + ALL tests 
 scripts/test.sh tests/ui -k crop                             # extra args go to pytest
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q      # all tests on Windows/CI
 PYTHONPATH=src .venv/bin/python -m gif_editor [file.gif]    # run (needs a display)
+.venv/bin/python scripts/check_build_flags.py                 # Nuitka flags valid (run after touching build.py)
+.venv/bin/python scripts/make_icon.py --check                 # committed icons match the generator
+PATH=$PWD/.venv/bin:$PATH .venv/bin/python scripts/build.py   # Linux onefile (~20 min; proves the recipe, no .exe)
+TMPDIR=$HOME/smoke-tmp .venv/bin/python scripts/smoke_build.py out/dist/GifEditor   # needs an exec-able TMPDIR here
 ```
+The Windows `.exe` can only be built on Windows (Nuitka cannot cross-compile): `.github/workflows/build-exe.yml` or `python scripts\build.py` on a Windows PC.
 
 ## Environment note
 The dev container lacks `libEGL.so.1`. `scripts/fetch-devlibs.sh` downloads Debian's `libegl1`, **verifies its pinned SHA-256** and unpacks it into the gitignored `.devlibs/`. The Debian signature chain was verified once, by hand, when the hash was pinned (`sqv --message` on `InRelease`, then the `Packages` hash, then the package SHA-256; commands in `docs/codebase/scripts/fetch-devlibs.md`); the script does not re-check it. Nothing is installed system-wide. `scripts/test.sh` sets `LD_LIBRARY_PATH` + `QT_QPA_PLATFORM=offscreen`, so ALWAYS run tests through it in this container (plain `pytest` without it fails to import PySide6). Workers must not fetch or add other system libraries; list them under packages_needed instead.
@@ -169,6 +174,9 @@ MainWindow(doc=None, parent=None)             # ui/main_window.py: owns Document
   .act_* (QActions; shortcuts are window-wide): act_preview (P: timing AND geometry), act_crop_tool (C),
       act_crop_reset, act_crop_nudge[4] (Ctrl+arrows), act_crop_resize[4] (Ctrl+Shift+arrows)
 ```
+
+Milestone 4 and 5 additions:
+```text
 # Milestone 4
 messages.py                                   # ui/messages.py: core exceptions -> plain-language dialogs (no Qt)
   Explanation(title, headline, body, details)  # .text == headline + "\n" + body (for last_error/status bar)
@@ -188,6 +196,36 @@ GifLoadError.kind / .info                     # NOT_FOUND, IS_DIRECTORY, UNREADA
 workers.run_async(...)                        # unchanged API; jobs now run as plain callables (never subclass
                                               # QRunnable in Python in this project: cross-thread wrapper/override
                                               # handling caused one crash and one GC deadlock in ~20 suite runs)
+
+# Milestone 5 (packaging)
+scripts/build.py
+  version() -> str                            # __version__ read as text from src/gif_editor/__init__.py
+  build_command(ver, *, windows=None) -> list[str]   # the Nuitka command; windows=True/False builds the other
+                                              # platform's command (for check_build_flags on Linux)
+  main() -> int                               # runs Nuitka with PYTHONPATH=src -> out/dist/GifEditor(.exe)
+scripts/check_build_flags.py                  # exit 0/1; known_options(), flag_name(arg), check(name, *, windows, known)
+                                              # validates against nuitka.options.OptionParsing.parser
+scripts/make_icon.py [--check]                # draw() -> icons/; --check compares decoded PIXELS (exit 0/1)
+scripts/smoke_build.py [binary]               # 3 runs of a built binary; pass/fail by exit codes + written file only
+gif_editor.resources                          # no Qt
+  resource_path(*parts) -> Path               # package dir first, then $NUITKA_ONEFILE_DIR/gif_editor/resources;
+                                              # never raises (returns the source-layout path if missing)
+  icon_path() -> Path | None                  # icon.ico on Windows, icon-256.png elsewhere; None if not bundled
+gif_editor.headless                           # no Qt
+  parse_spec(spec, state) -> (EditState, Path)   # "k=v,k=v"; lists use colons (delete=0:3:5); trim whole=ms,
+                                              # decimal=s; keys trim duration delete crop speed fps size colors dither out
+  run_edit_spec(source_path, spec) -> int     # prints "RESULT frames=.. size=WxH bytes=.. ms=.. path=.." or "ERROR ..."; 0/1
+app.main(argv)                                # --edit-spec IN SPEC -> run_edit_spec (exit 0/1, 2 = missing args), NO Qt;
+                                              # --smoke-gui [FILE] -> _arm_smoke_exit: 50 ms poll, 30 s timeout,
+                                              # prints "GUI OK ..."/"GUI FAIL ...", exits 0/1; file = first non-"--" arg;
+                                              # window icon from resources.icon_path()
+```
+
+Packaging rules:
+- After touching `scripts/build.py`, run `scripts/check_build_flags.py` (seconds) before any build (20 minutes). Keep (and extend) the comments in `build_command` that say why each flag is there: most of them record a build that failed without it.
+- No Qt import (direct or via a module-level import in `app.py`, `headless.py`, `resources/`, `core/`) may run before the `--edit-spec` branch in `app.main`: the headless path must work without a display or a Qt platform plugin.
+- The icon files are generated: change `scripts/make_icon.py`, rerun it, commit both; CI runs `--check`.
+- Never run two builds at once, and never delete `out/dist/` while a build runs.
 
 Merge-key rule: `SetStateCommand` merges ANY consecutive commands with the same key, so keys are per gesture. Spinbox scrubbing uses a fixed key per setting (`"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"`, `"crop"`); each drag uses a fresh key per press (`"trim-drag-N"`, `"crop-drag-N"`) so a drag never merges with the next drag or with a following spinbox edit; discrete actions (buttons, menu items, nudges, toggles) pass `None`. Never reuse a spinbox key for a drag.
 

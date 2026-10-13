@@ -10,7 +10,7 @@ Start here. Read in this order if you are new to the codebase.
 | [03-architecture.md](03-architecture.md) | How the code is organised *today*: layers, data flow, threading |
 | [04-development-log.md](04-development-log.md) | How the project was built, step by step: decisions, review findings, fixes |
 | [05-gif-primer.md](05-gif-primer.md) | GIF format concepts the code relies on (palettes, disposal, delays, LZW) |
-| [06-testing.md](06-testing.md) | How tests are organised and run, the GIF corpus, headless Qt |
+| [06-testing.md](06-testing.md) | How tests are organised and run, the GIF corpus, headless Qt, the packaging checks (flags, icons, build + smoke test) |
 | [codebase/](codebase/) | **One page per source/test/script file** (mirrors the repo tree) |
 
 ## The per-file pages (`docs/codebase/`)

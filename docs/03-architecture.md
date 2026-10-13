@@ -58,19 +58,30 @@ gif-editor/
 ├─ requirements-dev.txt           runtime + pytest, pytest-qt, ruff
 ├─ .gitignore                     venv/caches/build output, .devlibs/, scratch
 ├─ .github/workflows/ci.yml       Windows CI: ruff + pytest (offscreen Qt)
+├─ .github/workflows/build-exe.yml  Windows build (manual / v* tag): test, check, build, smoke-test, upload GifEditor.exe
 ├─ scripts/
 │  ├─ test.sh                     lint + all tests headlessly in the Linux container (temp files under out/)
 │  ├─ test-hidpi.sh               the UI tests at 150 % and 200 % scaling
 │  ├─ offscreen-screen.json       virtual 3840×2160 screen for the offscreen Qt platform
 │  ├─ fuzz_decoder.py             manual: damaged GIFs must load or be refused cleanly
 │  ├─ stress_probe.py             manual: GUI-thread stalls with big/corrupt GIFs in the real window
-│  └─ fetch-devlibs.sh            fetch + SHA-check + unpack libegl1 into .devlibs/
-├─ packaging/licenses/            (empty, M5: licence texts)
+│  ├─ fetch-devlibs.sh            fetch + SHA-check + unpack libegl1 into .devlibs/
+│  ├─ build.py                    M5: Nuitka onefile recipe -> out/dist/GifEditor(.exe)
+│  ├─ check_build_flags.py        M5: every build flag checked against Nuitka's own parser (both platforms)
+│  ├─ make_icon.py                M5: draws the icon (PNGs + multi-size .ico); --check compares pixels
+│  └─ smoke_build.py              M5: runs a built binary: clean failure, headless edit, --smoke-gui
+├─ packaging/
+│  ├─ build-requirements.txt      M5: build-only pins (nuitka, ordered-set, zstandard, patchelf on Linux)
+│  └─ licenses/                   (empty: the licence bundle is still open)
 ├─ src/gif_editor/
 │  ├─ __init__.py                 package docstring + __version__
 │  ├─ __main__.py                 `python -m gif_editor` → app.main()
-│  ├─ app.py                      main(): QApplication, Pillow self-test, MainWindow, optional path arg, wait for pool at exit
-│  ├─ resources/icons/            (empty; buttons use Qt standard icons)
+│  ├─ app.py                      main(): --edit-spec before any Qt import; QApplication, window icon, Pillow self-test,
+│  │                              MainWindow, optional path arg, --smoke-gui self-exit, wait for pool at exit
+│  ├─ headless.py                 M5: --edit-spec: parse a text spec, generate with no window (no Qt)
+│  ├─ resources/
+│  │  ├─ __init__.py              M5: resource_path()/icon_path(): source tree or Nuitka onefile (no Qt)
+│  │  └─ icons/                   generated app icon (icon.ico + PNGs); buttons still use Qt standard icons
 │  ├─ core/
 │  │  ├─ __init__.py              package marker ("no Qt")
 │  │  ├─ models.py                EditState, CropRect, OutputSize, Quality (immutable)
@@ -107,7 +118,7 @@ gif-editor/
    ├─ conftest.py                 session corpus fixtures (no Qt)
    ├─ gifgen.py                   simple GIFs via Pillow
    ├─ corpus.py                   raw GIF89a writer + reference compositor + 13 entries
-   ├─ core/test_*.py              one per core module + corpus tests
+   ├─ core/test_*.py              one per core module + corpus tests; M5: headless, resources, build flags
    └─ ui/conftest.py, test_*.py   pytest-qt tests: foundation, messages, one file per widget, main-window + M3 integration
                                   (conftest's autouse _drain_workers drains the pool after every UI test)
 ```
@@ -432,6 +443,8 @@ Shared widget rules (AGENTS.md):
 Things noticed while writing these docs. The code is the truth.
 - `docs/02-plan.md` is the original plan and is not rewritten; where the code deviates, see its [Implementation notes (deviations)](02-plan.md#implementation-notes-deviations).
 - `encoder.estimate_size` (the M1 helper) is still exported and tested but not used by the app; the summary uses `pipeline.estimate_size`. A comment next to `encoder.__all__` says so.
+- `scripts/build.py`'s docstring says a rebuild "reuses Nuitka's cache under `out/nuitka-build/`". No flag puts anything there: Nuitka's cache is in the user cache folder (or `NUITKA_CACHE_DIR`), and the per-build C sources are in `out/dist/__main__.build/` ([build page](codebase/scripts/build.md#invariants--gotchas)).
+- `scripts/check_build_flags.py` prints `Nuitka unknown` (it reads a `nuitka.__version__` that does not exist), and its docstring says the `--noinclude-*-mode` options are valid "because" a plugin flag is passed; in Nuitka 4.3 they belong to the always-enabled anti-bloat plugin. The check is stricter than needed, never looser ([checker page](codebase/scripts/check_build_flags.md#why-the-plugin-options-are-special)).
 - `Document.set_trim` defaults to `merge_key="trim"`. That is intended for spinbox scrubbing (the settings panel); drag and menu callers pass their own key (`"trim-drag-N"`) or `None`. Calling it without a key from a new discrete action would silently merge with the previous trim step.
 
 Fixed since M2 (kept here for reference): `app.py` now calls `run_selftest`; `Document.close()` now emits `currentIndexChanged`/`selectionChanged`; the decoder docstring now names the instance method `Image.Image.frombytes`; AGENTS.md lists `run_async(pool=)`, the full pipeline API and the per-widget interfaces; `scripts/fetch-devlibs.sh`'s header comment now says it checks only the pinned SHA-256 and how the pin was obtained (`76cd65c`); `encoder.estimate_size` is no longer "unused until M3" because M3 uses `pipeline.estimate_size` instead.
