@@ -38,6 +38,20 @@ DIST = OUT / "dist"
 ICONS = SRC / "gif_editor" / "resources" / "icons"
 
 APP_NAME = "GifEditor"
+
+#: Qt plugin families the app never uses (see build_command for why they are dropped).
+UNUSED_QT_PLUGINS = (
+    "iconengines",  # SVG icon engine: the app has no SVG icons
+    "mediaservice",  # audio/video
+    "printsupport",  # no printing
+    "platformthemes",  # Linux desktop-theme integration (GTK, portals)
+    "tls",  # SSL for networking: the app is offline
+    "egldeviceintegrations",  # Linux embedded EGL
+    "xcbglintegrations",  # OpenGL on X11: the canvas uses raster QGraphicsView
+    "wayland-shell-integration",  # Linux Wayland: X11/XWayland is used instead
+    "wayland-decoration-client",
+    "wayland-graphics-integration-client",
+)
 VERSION_FALLBACK = "0.0.0"
 
 
@@ -77,6 +91,14 @@ def build_command(ver: str, *, windows: bool | None = None) -> list[str]:
         f"--output-filename={APP_NAME}",
         f"--report={OUT / 'nuitka-report.xml'}",
         "--enable-plugin=pyside6",  # ships the Qt plugins (platform, image formats)
+        # Of Nuitka's "sensible" Qt plugin families the app needs only `platforms` (the
+        # windowing backend), `imageformats` (QIcon reads the .ico window icon through
+        # it on Windows) and `styles`. The rest are dropped: smaller exe, and on Linux each
+        # bundled library costs a slow `ldd` dependency scan (measured: the Wayland/TLS/EGL
+        # families alone kept a build in that scan for 30+ minutes). Names that do not
+        # exist on the build platform are ignored by Nuitka (it discards from a set), so
+        # one list serves Windows and Linux.
+        "--noinclude-qt-plugins=" + ",".join(UNUSED_QT_PLUGINS),
         # --- behaviour ----------------------------------------------------------------
         # Keep stdout/stderr attached when launched from a terminal (useful for a crash
         # report and required by the smoke test); without this a GUI app has no console.

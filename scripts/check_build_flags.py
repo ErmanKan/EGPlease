@@ -1,18 +1,18 @@
-"""Check every flag scripts/build.py passes against Nuitka's own option table.
+"""Check every flag scripts/build.py passes, using Nuitka's own option parser.
 
 Why this exists: four flags in the first version of `scripts/build.py` were wrong
 (`--cache-dir`, `--no-console`, a missing `--include-package`, a missing `PYTHONPATH`), and
-each mistake cost a full 20-minute compile to discover. Nuitka's real parser is importable,
-so the flags can be validated in a second instead of by building twice -- including the
-Windows-only ones, which cannot otherwise be tested on Linux at all.
+each mistake cost a full build (20+ minutes in the dev container) to discover. Nuitka's real
+parser is importable, so each flag is parsed exactly as `python -m nuitka` would parse it,
+in a second instead of a build -- including the Windows-only flags, which cannot otherwise
+be tried on Linux at all.
 
-Two subtleties this models, both verified against Nuitka 4.3's source:
-- `--enable-plugin=NAME` (and `--plugin-enable`, `--enable-plugins`) is registered in
-  `OptionParsing`, and `addStandardPluginCommandLineOptions` adds the `--noinclude-*-mode`
-  family at that point. So those are valid *because* the plugin flag is passed.
-- `--windows-console-mode` is accepted on every platform (`_warnOSSpecificOption` only
-  warns); what is truly Windows-only is `--windows-icon-from-ico`. The Linux check therefore
-  asserts that no icon-from-ico flag leaks, not that no `--windows-` flag appears.
+How: for each platform, a fresh copy of Nuitka's parser is built (`OptionParsing` creates it
+at import), the standard plugin options are added, plus the options of every plugin the
+command enables (`--enable-plugin=pyside6` brings `--noinclude-qt-plugins`), which is what
+Nuitka itself does before parsing. Then every flag is parsed on its own; anything the parser
+rejects is reported. Using the real parser (rather than a list of option names) also gets
+optparse's prefix matching right: `--enable-plugin` is accepted as `--enable-plugins`.
 
 Run it after touching `scripts/build.py`, and in CI:
     .venv/bin/python scripts/check_build_flags.py
@@ -20,6 +20,9 @@ Run it after touching `scripts/build.py`, and in CI:
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import io
 import sys
 from pathlib import Path
 
@@ -29,23 +32,50 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import build  # noqa: E402  (the module under test)
 
-#: Plugin-control spellings Nuitka accepts; the plugin's own options arrive with them.
-PLUGIN_FLAGS = ("enable-plugin", "enable-plugins", "plugin-enable")
-#: Registered alongside any plugin (`addStandardPluginCommandLineOptions`).
-PLUGIN_DEPENDENT = ("noinclude-pytest-mode", "noinclude-setuptools-mode")
-#: Only meaningful when building on Windows.
+#: Only meaningful when building on Windows; must never reach a Linux build.
 WINDOWS_ONLY = ("windows-icon-from-ico", "windows-company-name", "windows-product-name")
+PLUGIN_FLAG_PREFIXES = ("--enable-plugin=", "--enable-plugins=", "--plugin-enable=")
 
 
-def known_options() -> set[str]:
-    """Every long option Nuitka's parser accepts (importing it registers the options)."""
+def fresh_parser(cmd: list[str]):
+    """Nuitka's parser, as it would be set up for ``cmd`` (plugins it enables included)."""
     from nuitka.options import OptionParsing
+    from nuitka.plugins import Plugins
 
-    names: set[str] = set()
-    for group in [OptionParsing.parser, *OptionParsing.parser.option_groups]:
-        for option in group.option_list or []:
-            names.update(n.lstrip("-") for n in (*option._short_opts, *option._long_opts))
-    return names
+    OptionParsing = importlib.reload(OptionParsing)  # the parser is module state: rebuild it
+    parser = OptionParsing.parser
+    # Nuitka records each plugin whose options it registered in `plugin_options` and skips
+    # it the next time, so a second fresh parser would silently lack every plugin option
+    # (the Windows check then "rejected" valid flags). Forget that record first.
+    Plugins.plugin_options.clear()
+    Plugins.addStandardPluginCommandLineOptions(parser=parser, plugin_help_mode=False)
+    plugins = [
+        name
+        for arg in cmd
+        if arg.startswith(PLUGIN_FLAG_PREFIXES)
+        for name in arg.split("=", 1)[1].split(",")
+    ]
+    if plugins:
+        Plugins.addPluginCommandLineOptions(
+            parser=parser, plugin_names=plugins, plugin_help_mode=False
+        )
+    return parser
+
+
+def rejected_flags(cmd: list[str]) -> list[str]:
+    """The flags in ``cmd`` that Nuitka's parser refuses."""
+    parser = fresh_parser(cmd)
+    bad = []
+    for arg in cmd:
+        if not arg.startswith("--"):
+            continue
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+                parser.parse_args([arg, "main.py"])
+        except SystemExit:
+            bad.append(arg)
+    return bad
 
 
 def flag_name(arg: str) -> str | None:
@@ -55,19 +85,10 @@ def flag_name(arg: str) -> str | None:
     return arg[2:].split("=", 1)[0]
 
 
-def check(platform_name: str, *, windows: bool, known: set[str]) -> list[str]:
+def check(platform_name: str, *, windows: bool) -> list[str]:
     cmd = build.build_command("0.1.0", windows=windows)
+    problems = [f"{platform_name}: Nuitka rejects {a}" for a in rejected_flags(cmd)]
     names = {n for a in cmd if (n := flag_name(a)) is not None}
-    problems: list[str] = []
-    for name in sorted(names):
-        if name in known:
-            continue
-        if name in PLUGIN_FLAGS or name in PLUGIN_DEPENDENT:
-            # Valid only if the command actually asks for a plugin.
-            if not any(f in names for f in PLUGIN_FLAGS):
-                problems.append(f"{platform_name}: --{name} needs a plugin flag alongside it")
-            continue
-        problems.append(f"{platform_name}: unknown option --{name}")
     if windows:
         for required in ("windows-icon-from-ico", "windows-console-mode"):
             if required not in names:
@@ -76,8 +97,7 @@ def check(platform_name: str, *, windows: bool, known: set[str]) -> list[str]:
         for bad in WINDOWS_ONLY:
             if bad in names:
                 problems.append(f"Linux: --{bad} must not appear in a Linux build")
-        # The console flag is accepted everywhere, but must not say "attach" on Linux
-        # (it is a Windows console concept; Nuitka expects "disable" there).
+        # Accepted everywhere, but "attach" is a Windows console concept.
         console = next((a for a in cmd if a.startswith("--windows-console-mode=")), "")
         if console != "--windows-console-mode=disable":
             problems.append(f"Linux: unexpected console mode {console!r}")
@@ -86,18 +106,10 @@ def check(platform_name: str, *, windows: bool, known: set[str]) -> list[str]:
 
 
 def main() -> int:
-    known = known_options()
-    version = _nuitka_version()
-    print(f"Nuitka {version} accepts {len(known)} long options")
+    print(f"Nuitka {_nuitka_version()}")
     problems: list[str] = []
     for platform_name, windows in (("Linux", False), ("Windows", True)):
-        problems += check(platform_name, windows=windows, known=known)
-    # Options that cost real build time must never come back.
-    win = {n for a in build.build_command("0.1.0", windows=True) if (n := flag_name(a)) is not None}
-    for bad in ("cache-dir", "no-console"):
-        if bad in win:
-            problems.append(f"regression: --{bad} is not a real Nuitka option")
-    # A version string that does not survive to Nuitka is only caught late in a build.
+        problems += check(platform_name, windows=windows)
     for flag in ("file-version", "product-version"):
         value = next(
             (
@@ -112,7 +124,7 @@ def main() -> int:
     if problems:
         print("\nPROBLEMS:\n  " + "\n  ".join(problems))
         return 1
-    print("\nAll flags are valid for both platforms.")
+    print("\nAll flags are accepted by Nuitka's parser for both platforms.")
     return 0
 
 
