@@ -46,12 +46,15 @@ def version() -> str:
     return VERSION_FALLBACK
 
 
-def build_command(ver: str) -> list[str]:
+def build_command(ver: str, *, windows: bool | None = None) -> list[str]:
     """The Nuitka command line for this platform.
 
     Every flag here is here for a reason that cost a failed build, so they are commented.
+    ``windows`` can be passed explicitly so the Windows command line can be validated on a
+    Linux machine (see scripts/check_build_flags.py); it defaults to the real platform.
     """
-    windows = platform.system() == "Windows"
+    if windows is None:
+        windows = platform.system() == "Windows"
     cmd = [
         sys.executable,
         "-m",

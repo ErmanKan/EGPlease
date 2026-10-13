@@ -8,10 +8,14 @@ path runs one complete edit + generate with no window and prints a `RESULT ...` 
 `scripts/smoke_build.py` (and CI) can assert that the built executable really opens, edits
 and writes a GIF.
 
-The spec is a comma-separated list of `key=value` items, applied in the order written:
-    trim=START:END_MS        keep frames in [START, END) ms (END optional: to the end)
-    duration=MS              keep MS from the trim start
-    delete=0,3,5             delete these source frame indexes
+The spec is a comma-separated list of `key=value` items, applied in the order written.
+Because a comma separates items, a list uses colons inside the value:
+
+    trim=START:END           keep frames in [START, END); END optional = to the end.
+                             Whole numbers are milliseconds, decimals are seconds
+                             (end=400 -> 400 ms, start=0.5 -> 500 ms).
+    duration=MS              keep MS from the trim start (integer milliseconds)
+    delete=0:3:5             delete these source frame indexes (colon-separated)
     crop=X:Y:W:H             crop the frame (source pixels)
     speed=1.5                playback speed
     fps=12                   FPS limit
@@ -34,6 +38,15 @@ from gif_editor.core.models import CropRect, EditState, OutputSize
 from gif_editor.core.pipeline import generate
 
 
+def _ms(value: str) -> int:
+    """A time in the spec: a whole number is milliseconds, a decimal is seconds.
+
+    Documented behaviour, and the reason `trim=0.5:1.5` works: writing 1.5 for "1.5 ms"
+    would be a trap, while 1.5 s is what a human means by it.
+    """
+    return round(float(value) * 1000) if "." in value else int(value)
+
+
 def parse_spec(spec: str, state: EditState) -> tuple[EditState, Path]:
     """Apply ``spec`` to ``state``; return the new state and the output path."""
     out: Path | None = None
@@ -44,9 +57,9 @@ def parse_spec(spec: str, state: EditState) -> tuple[EditState, Path]:
         key, value = key.strip().lower(), value.strip()
         if key == "trim":
             start_s, _, end_s = value.partition(":")
-            start = int(float(start_s) * 1000) if "." in start_s else int(start_s)
+            start = _ms(start_s)
             if end_s:
-                end = int(float(end_s) * 1000) if "." in end_s else int(end_s)
+                end = _ms(end_s)
                 state = state.with_(trim_start_ms=start, trim_duration_ms=end - start)
             else:
                 state = state.with_(trim_start_ms=start, trim_duration_ms=None)

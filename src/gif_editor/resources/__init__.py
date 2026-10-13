@@ -16,21 +16,34 @@ from pathlib import Path
 __all__ = ["icon_path", "resource_path"]
 
 
-def resource_path(*parts: str) -> Path:
-    """Absolute path to a bundled resource (e.g. ``resource_path("icons", "icon.ico")``)."""
-    here = Path(__file__).resolve().parent / "resources"
-    for part in parts:
-        here = here / part
-    if here.exists():
-        return here
+def _bundle_roots() -> list[Path]:
+    """Directories to search for bundled files, most specific first.
+
+    ``__file__`` is inside `gif_editor/resources/`, so *that* directory is the root: an
+    earlier version appended "resources" again and resolved `resources/resources/icons`,
+    which silently disabled the window icon (found by tests/core/test_resources.py).
+    Inside a Nuitka onefile the tree is unpacked to a temporary directory; `__file__` points
+    there too, but the environment variable is the fallback used while the bootstrap runs.
+    """
+    roots = [Path(__file__).resolve().parent]
     base = os.environ.get("NUITKA_ONEFILE_DIR")
     if base:
-        candidate = Path(base) / "gif_editor" / "resources"
-        for part in parts:
-            candidate = candidate / part
+        roots.append(Path(base) / "gif_editor" / "resources")
+    return roots
+
+
+def resource_path(*parts: str) -> Path:
+    """Absolute path to a bundled resource (e.g. ``resource_path("icons", "icon.ico")``).
+
+    Returns the first existing candidate; when nothing exists, the path in the source layout
+    is returned so the caller can inspect or report it (it must not raise: a missing icon
+    must not stop the app from starting).
+    """
+    candidates = [root.joinpath(*parts) for root in _bundle_roots()]
+    for candidate in candidates:
         if candidate.exists():
             return candidate
-    return here  # let the caller see the missing path and handle it
+    return candidates[0]
 
 
 def icon_path() -> Path | None:
