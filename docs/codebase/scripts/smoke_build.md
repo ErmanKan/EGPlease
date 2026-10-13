@@ -46,7 +46,7 @@ It also required a `RESULT` line on stdout, which is unreliable on Windows (see 
   ```
   This is a container quirk, not an app problem; on Windows and in CI no setting is needed. (An earlier docstring said the script copies the binary "under `$HOME`" by itself; it does not, it uses whatever `TMPDIR` says.)
 - The script needs Pillow and `tests/gifgen.py`, i.e. a checkout with the dev venv. It tests a binary; it is not shipped.
-- Step 3 relies on the self-test passing. If the bundled Pillow were broken, `app.main` would show its blocking self-test dialog (`QMessageBox.exec()`), the binary would not exit, and the step would fail by the 120 s timeout rather than by exit code. Still a failure, just a slow one.
+- Step 3 fails fast if the bundled self-test fails: under `--smoke-gui`, `app.main` prints `GUI FAIL startup self-test: ...` and exits 1 instead of showing its blocking dialog (an earlier version would only have failed at the 120 s timeout).
 - `QT_QPA_PLATFORM=offscreen` is set for all steps; steps 1–2 do not need it.
 
 ## Tests

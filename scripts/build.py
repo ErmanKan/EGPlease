@@ -15,8 +15,12 @@ the app needs (Nuitka cannot discover a package it is only told about by a scrip
 The result lands in `out/dist/`. Nuitka **cannot cross-compile**: a Windows `.exe` must be
 built on Windows, which is what `.github/workflows/build-exe.yml` does.
 
-A rebuild reuses Nuitka's cache under `out/nuitka-build/`; changing only Python code is fast,
-re-running after a dependency change is slow.
+Rebuilds reuse Nuitka's own cache in the user cache directory (override it with the
+`NUITKA_CACHE_DIR` environment variable); per-build working files go to
+`out/dist/__main__.build/`. On Linux in the dev container most of the build time is
+Nuitka's dependency scan (`ldd` once per bundled Qt library, with a 104-directory
+LD_LIBRARY_PATH, in a filesystem with slow failed lookups), not the C compile; Windows uses
+a different dependency walker and does not have that cost.
 """
 
 from __future__ import annotations

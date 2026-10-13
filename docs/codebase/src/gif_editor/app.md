@@ -38,7 +38,7 @@ Command line:
 - `main()` blocks in `app.exec()`. The tests replace `QApplication.exec` (or `QMessageBox.exec`) with a stub to run `main` without blocking.
 - Only the first non-`--` argument is used; further files are ignored. There is no option parser: `--edit-spec` and `--smoke-gui` are recognised with plain `in` tests, and unknown `--flags` are ignored (Qt may also read its own options from `args`).
 - **No Qt import may move above the `--edit-spec` branch** (AGENTS.md rule). Module-level imports in this file must stay Qt-free for the same reason.
-- `--smoke-gui` with a broken bundled Pillow does not reach the timer: the self-test dialog blocks in `exec()`, and the smoke test fails only by its 120 s process timeout.
+- With `--smoke-gui` a failed self-test does **not** show the blocking dialog: it prints `GUI FAIL startup self-test: <reason>` and returns 1 at once, so a broken build fails the smoke test immediately instead of by its 120 s process timeout (`test_smoke_gui_fails_fast_on_a_broken_selftest`).
 - The self-test error dialog uses a blocking `exec()` on purpose: there is no window yet and the app is about to exit. (In-window errors use the non-blocking `MainWindow.show_explanation`.)
 - A Generate still running at close time is cancelled by the window itself (`closeEvent`), not here; this wait only covers whatever is left in the pool.
 

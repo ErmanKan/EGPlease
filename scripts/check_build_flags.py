@@ -117,9 +117,10 @@ def main() -> int:
 
 
 def _nuitka_version() -> str:
-    import nuitka
+    # nuitka has no __version__ attribute; nuitka.Version is where the CLI gets it.
+    from nuitka.Version import getNuitkaVersion
 
-    return getattr(nuitka, "__version__", "unknown")
+    return getNuitkaVersion()
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 ```
 Typical output:
 ```
-Nuitka unknown accepts 216 long options
+Nuitka 4.3 accepts 216 long options
 Linux    22 args -> ok
 Windows  22 args -> ok
 
@@ -56,7 +56,7 @@ Nuitka accepts `--windows-console-mode` on every platform; on a non-Windows host
 - It validates **names**, not values: a wrong path or a wrong plugin name (`--enable-plugin=pyside7`) passes here and fails in Nuitka. Only the console-mode value and the version values are checked.
 - It is stricter than Nuitka for abbreviations: an unambiguous shortened flag (say `--assume-yes`) would be accepted by Nuitka but is reported here as unknown. `--enable-plugin` is the one abbreviation it knows about. Write every other flag in full.
 - It needs `nuitka` installed (`packaging/build-requirements.txt`); the test file therefore also needs it, and it is in the project venv.
-- **Cosmetic bug:** the first line prints `Nuitka unknown`, because `nuitka` has no `__version__` attribute (Nuitka 4.3 exposes its version through `nuitka.Version.getNuitkaVersion()`). It does not affect the result.
+- The first line reports the version through `nuitka.Version.getNuitkaVersion()`, because `nuitka` has no `__version__` attribute (an earlier version printed `Nuitka unknown`).
 
 ## Tests
 - `tests/core/test_check_build_flags.py` ([page](../tests/core/test_check_build_flags.md)): the committed command lines pass for both platforms; each historical mistake injected into the command is caught (`--cache-dir`, `--no-console`, a Windows icon flag in the Linux build, an invented flag); dropping `--enable-plugin` is reported.

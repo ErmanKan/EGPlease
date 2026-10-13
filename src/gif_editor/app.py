@@ -81,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_selftest()
     except SelfTestError as exc:
+        if "--smoke-gui" in args:
+            # Packaging check: a modal dialog would block until the smoke test's timeout.
+            # Fail at once with one line instead; the self-test failing IS the finding.
+            print(f"GUI FAIL startup self-test: {exc}")
+            return 1
         # Only a broken build can get here (the Pillow version is pinned and bundled), so
         # the message says so plainly and keeps the technical text for a bug report.
         box = QMessageBox(
