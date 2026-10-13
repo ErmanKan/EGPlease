@@ -321,7 +321,7 @@ Nuitka translates Python to C and compiles it with the target platform's C compi
 1. the GitHub Actions workflow [`build-exe.yml`](codebase/config-files.md#githubworkflowsbuild-exeyml) on a `windows-latest` runner (it uploads `GifEditor-windows`), or
 2. the user's Windows PC (`python scripts\build.py`; commands in the [README](../README.md#build-the-exe)).
 
-What *was* done here: the **same recipe** was built for Linux. The result, `out/dist/GifEditor`, is an **11.5 MB** self-contained onefile whose only dynamic dependency is the C library. That proves the parts of the recipe that do not depend on the OS: the include rules, the package data (icons), the PySide6 plugin, the onefile packing. It does not prove the Windows-only parts (the `.ico` resource, console mode `attach`, Windows DLLs); those are validated by the flag checker below and, finally, by the first Windows build.
+What *was* done here: the **same recipe** was built for Linux and the result, `out/dist/GifEditor` (61.6 MB), passed all three smoke steps (see "Linux binary smoke result" below). That proves the parts of the recipe that do not depend on the OS: the include rules, the package data (icons), the PySide6 plugin and its Qt plugins, the onefile packing, the headless and GUI paths. It does not prove the Windows-only parts (the `.ico` resource, console mode `attach`, Windows DLLs); those are checked by the flag checker below and, finally, by the first Windows build. (An earlier "11.5 MB, only libc dynamic" figure came from a build that was later found to be broken.)
 
 ### Four wrong flags, four lost builds
 A from-scratch Linux build took about **20 minutes** in the container (why it is that slow *here* is explained [below](#two-wrong-claims-about-why-the-build-was-slow); it is not the drive and not the C compiler). Four mistakes in `scripts/build.py` were each found only by running a build, before a flag checker existed; each cost about one ~20-minute build cycle:
@@ -380,9 +380,20 @@ The user's PC had to be shut down in the middle of M5. Before that, all work was
 - Full suite: **709 passed + 2 xfailed** (679 from M4, plus 19 + 5 + 6 new); ruff format and lint clean.
 - `scripts/check_build_flags.py`: Linux and Windows command lines valid (22 arguments each).
 - `scripts/make_icon.py --check`: icons up to date.
-- Linux onefile build of the same recipe: 11.5 MB, only libc dynamic.
+- Linux onefile build: see below (the 11.5 MB figure from early M5 belonged to a broken build).
 
-LINUX BINARY SMOKE RESULT: pending (filled in by the orchestrator)
+**Linux binary smoke result (`866533e`, after the Qt plugin trim): 3 of 3 steps pass.** `scripts/build.py` produced `out/dist/GifEditor`, **61.6 MB**, in 19 minutes (about 13 of them the `ldd` dependency scan; before the trim the scan alone ran past 50 minutes and the build was stopped). `scripts/smoke_build.py` on it:
+1. missing file: exit 1, one `ERROR GifLoadError: File not found: …` line, no traceback;
+2. edit + generate: exit 0, `RESULT frames=3 size=32x24 bytes=249 ms=300`, the written GIF is 32×24;
+3. GUI opens a GIF: exit 0. It printed **no** `GUI OK` line: with console mode `disable` the frozen GUI's stdout does not reach the pipe. Deciding pass/fail by exit code, not by the line, is what let this working build pass.
+
+Three environment findings on the way, none of them app bugs:
+- The "11.5 MB, only libc dynamic" binary from early M5 was the **broken** one (built without `--include-package`, it died with `No module named 'gif_editor.app'`). 61.6 MB is the real size with Python, Qt, Pillow and numpy inside.
+- The first smoke attempt failed in all three steps with "couldn't unpack file to target path: Input/output error": `TMPDIR` was under `/root`, which in this container is the user's **C: drive, which was full (232 GB of 232 GB, 216 MB free)**. The user was told; the test was rerun with `TMPDIR` under `/home` (the container's own disk, removed afterwards).
+- Step 3 then failed with `libEGL.so.1: cannot open shared object file`: the dev container has no system libEGL (the M2 finding; tests use the project-local copy in `.devlibs/`), so Nuitka found none to bundle. Every Linux desktop ships it and Windows does not use it, so step 3 was run with `LD_LIBRARY_PATH` pointing at `.devlibs/`, the same as the test suite. The command used:
+  `LD_LIBRARY_PATH=$PWD/.devlibs/root/usr/lib/x86_64-linux-gnu TMPDIR=/home/smoke-tmp .venv/bin/python scripts/smoke_build.py out/dist/GifEditor`
+
+What this proves: the recipe bundles a working app (core and Qt half). What it does not prove: the Windows `.exe`, which is still built only by the workflow or on Windows.
 
 ### Still open for M5
 - **The exit criterion is not met yet:** `GifEditor.exe` has never been built or run. Next: run `build-exe.yml` (or build on the user's PC), then run the `.exe` on a **clean Windows 11 VM without Python**, from a normal folder and from a USB stick.

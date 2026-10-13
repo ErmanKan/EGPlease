@@ -1,99 +1,64 @@
-# RESUME HERE — mid Milestone 5 (packaging)
+# RESUME HERE — Milestone 5 (packaging), one step from done
 
-**Written:** 2026-10-11, during M5, before a planned PC shutdown.
-**Repo:** `/workspace/projects/gif-editor` (host: `F:\Projects\gif-editor`), branch `main`, HEAD `4779648`.
-
-## State: everything is committed
-
-`git status` is clean. Tests: **679 passed + 2 xfailed**, lint clean (measured at the last full run
-before the M5 code landed; re-run `scripts/test.sh` to confirm).
+**Written:** 2026-10-13. **Repo:** `/workspace/projects/gif-editor` (host `F:\Projects\gif-editor`), branch `main`.
+Everything is committed. Tests: **716 passed + 2 xfailed**, lint clean.
 
 | Milestone | Status |
 |---|---|
 | M1–M4 | ✅ Done |
-| M5 Packaging | 🔄 **In progress** — see below |
+| M5 Packaging | 🔄 Recipe done and proven on Linux; **the Windows `.exe` has never been built** |
 
-### M5 done so far (commits `3531ca0`, `4779648`)
-- `scripts/make_icon.py` — generates the icon (no binary art is hand-made). Multi-size `.ico`
-  (16/24/32/48/64/128/256) plus PNGs in `src/gif_editor/resources/icons/`. **Small sizes are drawn
-  separately, not downscaled**: at 16 px the film sprockets vanished, so sizes ≤ 32 px are drawn as a
-  bold play triangle on the plate. Regenerating produces a byte-identical file (CI asserts this).
-- `src/gif_editor/resources/__init__.py` — `icon_path()` / `resource_path()`, working both from a source
-  checkout and inside a Nuitka onefile (which unpacks to a temp dir; checks `__file__` then
-  `NUITKA_ONEFILE_DIR`).
-- `src/gif_editor/app.py` — sets the window/taskbar icon; the `--edit-spec` branch was moved **above every
-  Qt import** (importing Qt needs a platform plugin and libEGL, and the headless path must work on a bare
-  server).
-- `src/gif_editor/headless.py` — `--edit-spec IN.gif "trim=0:400,delete=2,crop=8:6:40:30,size=32x24,out=OUT.gif"`:
-  one complete edit+generate with no window, printing a `RESULT frames=… size=… bytes=… path=…` line.
-  Exists so a packaged build can be verified automatically. Verified working from source.
-- `scripts/build.py` — the Nuitka onefile recipe (shared by Windows and Linux).
-- `scripts/smoke_build.py` — runs a built binary and checks it starts, edits and writes a GIF.
-- `packaging/build-requirements.txt` — pinned build deps (`nuitka==4.3`, `ordered-set`, `zstandard`,
-  `patchelf` on non-Windows).
-- `.github/workflows/build-exe.yml` — **the way to get a real `.exe`**: lint+test, check the icon is
-  current, build, smoke-test, upload `GifEditor.exe` as an artifact. Trigger it manually
-  (Actions → Build GifEditor.exe → Run workflow) or push a `v*` tag.
+## What M5 has (all committed)
+- `scripts/build.py` — Nuitka 4.3 onefile recipe, shared by Windows and Linux; drops 10 unused Qt plugin families.
+- `scripts/check_build_flags.py` — parses every build flag with Nuitka's own parser, for both platforms, in seconds.
+- `scripts/make_icon.py` (+ `--check`, pixel comparison) and the icons in `src/gif_editor/resources/icons/`.
+- `scripts/smoke_build.py` — 3 steps against a built binary; pass/fail by exit code and output file.
+- `src/gif_editor/headless.py` (`--edit-spec`) and `--smoke-gui` in `app.py`: the two paths a built binary is checked with.
+- `.github/workflows/build-exe.yml` + `packaging/build-requirements.txt`.
+- Docs: per-file pages for all of the above, dev-log "Milestone 5", testing guide, README "Build the .exe".
 
-### The one thing that is NOT done: the `.exe` itself was never produced
+## Proven so far
+The same recipe built a **Linux** binary (61.6 MB, 19 min) that passed **all 3 smoke steps**: clean failure on a missing
+file, a real edit writing a correct 32×24 GIF, and the real Qt window opening a GIF offscreen. Details:
+[dev log, Milestone 5](04-development-log.md#milestone-5-packaging).
 
-**Nuitka cannot cross-compile.** This container is Linux with no Windows toolchain, no mingw, no wine, and
-nothing on the host is executable from inside it (`/mnt/c` does not exist; `C:\` is mounted at `/root` but
-only as inert files). So a `.exe` can only be built on Windows, by CI or by the user.
+## Next step: build the `.exe` on Windows (cannot be done from the container)
+Nuitka cannot cross-compile, and the container has no Windows toolchain. Either:
 
-What *was* proven here: the recipe compiles a **Linux onefile binary successfully** (an 11.5 MB self-contained
-`out/dist/GifEditor`, first built earlier in the session). The recipe's bugs were found and fixed by doing it:
-1. `--include-package=gif_editor` is required — pointed only at `__main__.py`, Nuitka could not see
-   `gif_editor.app` and the binary died with `No module named 'gif_editor.app'`.
-2. `--include-package` is resolved through the *build* interpreter's path, so `scripts/build.py` sets
-   `PYTHONPATH=src` for the Nuitka subprocess; without it Nuitka stops with "failed to locate package".
-3. `--cache-dir` and `--no-console` are not real options (a bad build with those exited 2).
-4. On Linux, Nuitka onefile needs `patchelf`; it is installed project-locally in the venv (the wheel
-   `patchelf==0.19.1.0`), never system-wide.
-5. Onefile unpacks into `TMPDIR` and execs from there. The container mounts `/tmp`, `/dev/shm`, `/var/tmp`
-   **and the project drive** with `noexec`, so the binary only runs with `TMPDIR` pointed at an executable
-   directory (`/root/…`). This is a container quirk, not an app problem, but it is why `smoke_build.py`
-   copies the binary into `$HOME`-based temp dir before running it.
+**A. On the PC** (PowerShell, repo root; Nuitka downloads a C compiler on first run with `--assume-yes-for-downloads`):
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt -r packaging\build-requirements.txt
+.venv\Scripts\python scripts\check_build_flags.py
+.venv\Scripts\python scripts\build.py
+.venv\Scripts\python scripts\smoke_build.py out\dist\GifEditor.exe
+```
+**B. GitHub Actions:** push the repo to GitHub (Gate 2: ask the user first, the repo has no remote yet), then
+Actions → "Build GifEditor.exe" → Run workflow; download the `GifEditor-windows` artifact.
 
-### Next step for M5 (start here)
-1. Check out the repo on Windows (or push to GitHub and run the `build-exe.yml` workflow).
-2. `.venv\Scripts\python -m pip install -r requirements-dev.txt -r packaging/build-requirements.txt`
-3. `.venv\Scripts\python scripts\build.py` → `out\dist\GifEditor.exe`
-4. `.venv\Scripts\python scripts\smoke_build.py out\dist\GifEditor.exe` → must print "OK".
-5. Then the M5 exit criterion from [02-plan.md §6](02-plan.md#6-milestones): it runs on a **clean Windows 11
-   VM with no Python**, from any folder or a USB stick. Until that has happened, M5 is *not* done. Also
-   still open from the plan: the licence bundle in `packaging/licenses/` (currently only a `.gitkeep`) and
-   code signing (explicitly optional, not needed for a personal build).
-6. After the first successful `.exe`, the M5 docs pass still has to run (per-file pages for
-   `scripts/build.py`, `make_icon.py`, `smoke_build.py`, `headless.py`, `resources/__init__.py`,
-   `packaging/build-requirements.txt`, `.github/workflows/build-exe.yml`, a `tests/` page for the new
-   headless tests, INDEX rows, README "Download/Build" section, dev-log M5 section, AGENTS.md).
+Then the M5 exit criterion ([02-plan §6](02-plan.md#6-milestones)): the `.exe` runs on a **clean Windows 11 machine
+without Python**, from any folder and from a USB stick. Still open after that: the licence bundle in
+`packaging/licenses/` (only `.gitkeep`), and code signing (optional).
 
-### Also outstanding (small)
-- `tests/` has **no tests for the new M5 code yet** (headless spec parsing, `icon_path()` resolution).
-  The smoke test proves the path end-to-end but is manual; a `tests/core/test_headless.py` and a
-  small `tests/test_resources.py` are the obvious gap.
-- A full-suite run under load gave one failure, `tests/core/test_timeline.py::test_performance_10k_frames`
-  (a 50 ms budget). It passes alone and passed in every earlier run; the load was the concurrent Nuitka
-  build (load average 4.7 vs ~1.7). Worth knowing if CI ever reports it: it is a wall-clock assertion on a
-  shared runner.
+## Things to know before building on Windows
+- **The user's C: drive was full** (232 GB of 232 GB, 216 MB free, seen 2026-10-13). A Windows build needs several GB
+  on the drive holding `%TEMP%` and Nuitka's cache (`%LOCALAPPDATA%\Nuitka`), and the onefile `.exe` unpacks about
+  150 MB into `%TEMP%` on every start. Free space on C: first, or set `NUITKA_CACHE_DIR` and `TEMP`/`TMP` to F:.
+  A full disk shows up as "Input/output error" when unpacking, not as "disk full".
+- The Linux-only build costs (the `ldd` scan) do not apply on Windows; expect a much shorter dependency phase.
 
-## Known issues carried from M4 (unchanged)
-- The filmstrip has a fixed 140 px height; at 911×512 logical (1366×768 at 150 %) the canvas gets ~184 px.
-- The size estimate can be low (~0.67×) on long GIFs whose middle is unrepresentative.
-- The crash/deadlock seen in the suite before `9ab961f`/`c4b9329` was never reproduced in 48 runs after the
-  fix (30-run soak: 30/30 clean).
+## Known issues carried forward
+- `tests/core/test_timeline.py::test_performance_10k_frames` (50 ms wall-clock budget) can fail under heavy load,
+  e.g. during a build; it passes alone.
+- Filmstrip fixed at 140 px tall (small windows get a ~184 px canvas); the size estimate can be ~0.67× low on long GIFs.
 
-## Environment reminders
-- Tests: `scripts/test.sh`. HiDPI: `scripts/test-hidpi.sh`. Probe: `PYTHONPATH=src:tests .venv/bin/python scripts/stress_probe.py`
-  (and `scripts/fuzz_decoder.py`). All keep their files under `out/` (gitignored) — never `/tmp`.
-- Build deps for local Linux builds are in the venv already; `.venv/bin/patchelf` must be on `PATH` for a
-  local Nuitka onefile build (`PATH=$PWD/.venv/bin:$PATH scripts/…`).
-- Delegation workers are NOT durable and a provider key can be revoked mid-run. Commit early; snapshot
-  unfinished work with a clear flag; update this note before shutting down (which is what this file is).
-- Container quirks that cost time this session: `pkill -f`/`pgrep -f` inside `bash -lc` matches its own
-  shell (kill by PID); the project drive is `noexec`, so binaries must be run from `$HOME`; `python -c`/
-  heredoc quoting is fragile — prefer writing a file and running it.
+## Container quirks (dev environment only)
+- Tests: `scripts/test.sh`, `scripts/test-hidpi.sh`. Temp files only under `out/` (gitignored); never `/tmp`.
+- `/tmp`, `/dev/shm`, `/var/tmp` and the project drive are `noexec`; `/root` is the host's C: drive (full).
+  To run a built Linux binary: `TMPDIR` under `/home` (container disk) and `LD_LIBRARY_PATH` at `.devlibs/`
+  (no system libEGL). A local Linux build needs `.venv/bin` on `PATH` (for the venv's `patchelf`).
+- `pkill -f`/`pgrep -f` inside `bash -lc` matches its own shell: kill by PID.
+- Delegation workers are not durable and a provider key can be revoked mid-run; commit early and keep this note current.
 
-## Full design history
-See `docs/04-development-log.md` and `docs/02-plan.md` (with its deviations section).
+## Full history
+`docs/04-development-log.md` and `docs/02-plan.md` (with its deviations section).

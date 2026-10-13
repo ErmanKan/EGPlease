@@ -58,7 +58,12 @@ TMPDIR="$HOME/smoke-tmp" .venv/bin/python scripts/smoke_build.py out/dist/GifEdi
 ```
 *The `TMPDIR` note:* a onefile binary unpacks itself into `TMPDIR` and executes the unpacked program. In this container `/tmp`, `/dev/shm`, `/var/tmp` and the project drive are mounted `noexec`, so with the default `TMPDIR` the binary cannot start. Point `TMPDIR` at an executable folder under `$HOME` (outside the repo, so delete it when done). This is a container quirk; Windows and CI need nothing. Do not start a build while another one is running in `out/`, and never delete `out/dist/` during a build.
 
-LINUX BINARY SMOKE RESULT: pending (filled in by the orchestrator)
+**Linux binary smoke result:** 3 of 3 steps pass on the 61.6 MB binary built from `866533e` (details and the three environment findings in the [dev log](04-development-log.md#milestone-5-packaging)). In this container two settings are needed, neither of which applies on a normal Linux desktop or on Windows:
+```bash
+LD_LIBRARY_PATH=$PWD/.devlibs/root/usr/lib/x86_64-linux-gnu \
+TMPDIR=/home/smoke-tmp .venv/bin/python scripts/smoke_build.py out/dist/GifEditor
+```
+`TMPDIR` must be executable **and have room**: the binary unpacks about 150 MB. `/root` is the host's C: drive, which was full, and failing there looked like an I/O error, not like "disk full".
 
 **Not covered by any automated check yet:** the M5 exit criterion, i.e. the `.exe` running on a clean Windows 11 machine without Python, from any folder and from a USB stick. That is a manual test on a VM.
 
