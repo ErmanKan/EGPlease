@@ -7,8 +7,10 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 |---|---|---|
 | `src/gif_editor/__init__.py` | Package docstring and `__version__ = "0.1.0"` | [page](src/gif_editor/__init__.md) |
 | `src/gif_editor/__main__.py` | `python -m gif_editor` → `app.main()` | [page](src/gif_editor/__main__.md) |
-| `src/gif_editor/app.py` | `main()`: `QApplication` (Fusion), Pillow self-test (plain failure dialog), `MainWindow`, optional GIF path from the command line, waits for the thread pool before exit | [page](src/gif_editor/app.md) |
-| `src/gif_editor/resources/icons/.gitkeep` | Empty placeholder for app icons (none used yet: buttons use Qt standard icons) | — (empty file) |
+| `src/gif_editor/app.py` | `main()`: `--edit-spec` handled before any Qt import; `QApplication` (Fusion), window icon, Pillow self-test (plain failure dialog), `MainWindow`, first non-flag argument opened, `--smoke-gui` self-exit (`_arm_smoke_exit`), waits for the thread pool before exit | [page](src/gif_editor/app.md) |
+| `src/gif_editor/headless.py` | `--edit-spec` mode: `parse_spec` (comma-separated `key=value`, lists with colons, whole numbers ms / decimals s) and `run_edit_spec` (generate, print `RESULT`/`ERROR`, exit code); no Qt | [page](src/gif_editor/headless.md) |
+| `src/gif_editor/resources/__init__.py` | `resource_path` / `icon_path`: find bundled files from source or a Nuitka onefile (`NUITKA_ONEFILE_DIR`); never raises | [page](src/gif_editor/resources/__init__.md) |
+| `src/gif_editor/resources/icons/` (`icon.ico`, `icon.png`, `icon-16/24/32/48/64/256.png`, `.gitkeep`) | Generated app icon (data, made by `scripts/make_icon.py`) | [config-files](config-files.md#srcgif_editorresourcesicons) |
 
 ### Core engine: `src/gif_editor/core/` (no Qt)
 | File | Summary | Page |
@@ -28,7 +30,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `ui/__init__.py` | Package marker | [page](src/gif_editor/ui/__init__.md) |
 | `ui/document.py` | `Document`: the hub holding source, `EditState`, undo stack, current frame, selection; all widgets talk to it | [page](src/gif_editor/ui/document.md) |
 | `ui/commands.py` | `SetStateCommand`: generic old → new `EditState` undo step with gesture merging | [page](src/gif_editor/ui/commands.md) |
-| `ui/workers.py` | `run_async`: run a plain callable on `QThreadPool`, callbacks on the GUI thread; relay freed only after the worker left `emit()` |
+| `ui/workers.py` | `run_async`: run a plain callable on `QThreadPool`, callbacks on the GUI thread; relay freed only after the worker left `emit()` | [page](src/gif_editor/ui/workers.md) |
 | `ui/messages.py` | `Explanation` + `explain_load_error` / `explain_load_warnings` / `explain_generate_error`: exceptions → plain-language dialog texts (no Qt) | [page](src/gif_editor/ui/messages.md) |
 | `ui/qt_image.py` | `pil_to_qimage` (thread-safe copy) and `checkerboard_brush` | [page](src/gif_editor/ui/qt_image.md) |
 | `ui/settings_panel.py` | `SettingsPanel`: left panel with timing, size, crop (embedded `CropPanel`), quality controls, the live summary card with the size estimate, and the Generate button (pinned outside the scroll area by the window); tooltips that explain each range (`_explain`); `format_bytes` | [page](src/gif_editor/ui/settings_panel.md) |
@@ -62,12 +64,15 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/core/test_pipeline.py` | End to end: summary == output, cancel, loop, verify, PNG, size and flicker (24) | [page](tests/core/test_pipeline.md) |
 | `tests/core/test_estimate.py` | `pipeline.estimate_size` accuracy bounds, direction under edits, speed, no files; `write_stream` into a buffer (7) | [page](tests/core/test_estimate.md) |
 | `tests/core/test_selftest.py` | Self-test passes fast and catches broken internals (6) | [page](tests/core/test_selftest.md) |
+| `tests/core/test_headless.py` | `--edit-spec` grammar key by key (ms vs s, colon lists, order, case), a real run writing a 32×24 GIF, clean `ERROR` exit 1 (19) | [page](tests/core/test_headless.md) |
+| `tests/core/test_resources.py` | Icons found from source, platform format, `None` when missing, `NUITKA_ONEFILE_DIR` fallback, no raise (5) | [page](tests/core/test_resources.md) |
+| `tests/core/test_check_build_flags.py` | Committed Nuitka flags valid for Linux and Windows; 4 injected historical bad flags caught; dropped plugin flag caught (6) | [page](tests/core/test_check_build_flags.md) |
 | `tests/ui/__init__.py` | Empty package marker | [page](tests/ui/__init__.md) |
 | `tests/ui/conftest.py` | autouse `_drain_workers` (drain the pool after every UI test), `gif_path` (8×40×30 GIF) and `doc` (open `Document`) fixtures | [page](tests/ui/conftest.md) |
 | `tests/ui/test_document.py` | `Document` apply/undo/merge/delete/index/selection (11) | [page](tests/ui/test_document.md) |
 | `tests/ui/test_workers.py` | `run_async` threading, errors, progress, relay release (3) | [page](tests/ui/test_workers.md) |
 | `tests/ui/test_qt_image.py` | `pil_to_qimage` pixels/ownership, brush (2) | [page](tests/ui/test_qt_image.md) |
-| `tests/ui/test_smoke.py` | Qt renders headlessly; failed self-test → plain dialog, exit 1 (2) |
+| `tests/ui/test_smoke.py` | Qt renders headlessly; failed self-test → plain dialog, exit 1 (2) | [page](tests/ui/test_smoke.md) |
 | `tests/ui/test_messages.py` | Every load/write error → plain explanation with details, no jargon; Windows locked file (22) | [page](tests/ui/test_messages.md) |
 | `tests/ui/test_settings_panel.py` | Controls → `EditState`, merge keys, undo refresh, aspect lock, presets, summary, invalid edits, Generate button, every input explains its limits (19) | [page](tests/ui/test_settings_panel.md) |
 | `tests/ui/test_canvas.py` | Frame pixels, fit/zoom, deleted overlay, placeholder, `map_to_image`, wheel, Space/middle-drag pan, expensive frames off-thread (16) | [page](tests/ui/test_canvas.md) |
@@ -90,6 +95,10 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `scripts/stress_probe.py` | Manual probe: big/corrupt GIFs through the real window, GUI-thread stalls per phase | [page](scripts/stress_probe.md) |
 | `scripts/offscreen-screen.json` | Virtual 3840×2160 screen for Qt's offscreen platform | [config-files](config-files.md#scriptsoffscreen-screenjson) |
 | `scripts/fetch-devlibs.sh` | Fetch, SHA-256-check and unpack Debian `libegl1` into `.devlibs/` | [page](scripts/fetch-devlibs.md) |
+| `scripts/build.py` | Nuitka 4.3 onefile recipe: `build_command(ver, *, windows=None)` with every flag explained, `PYTHONPATH=src` for Nuitka, output `out/dist/GifEditor(.exe)` | [page](scripts/build.md) |
+| `scripts/check_build_flags.py` | Validates every `build.py` flag for both platforms against Nuitka's own option parser in ~1 s; guards against `--cache-dir`/`--no-console` | [page](scripts/check_build_flags.md) |
+| `scripts/make_icon.py` | Draws the icon (small sizes drawn simplified, 4× supersampling), writes PNGs + 7-size `.ico`; `--check` compares pixels | [page](scripts/make_icon.md) |
+| `scripts/smoke_build.py` | Runs a built binary 3 times (clean failure, real edit → 32×24 GIF, `--smoke-gui`); pass/fail by exit codes and the written file | [page](scripts/smoke_build.md) |
 
 ## Config and repo files
 | File | Summary | Page |
@@ -98,9 +107,11 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `requirements.txt` | Runtime pins | [config-files](config-files.md#requirementstxt) |
 | `requirements-dev.txt` | Runtime + pytest, pytest-qt, ruff | [config-files](config-files.md#requirements-devtxt) |
 | `.github/workflows/ci.yml` | Windows CI: ruff + pytest with offscreen Qt | [config-files](config-files.md#githubworkflowsciyml) |
+| `.github/workflows/build-exe.yml` | Windows build (manual or `v*` tag): lint + test, icon and flag checks, build, smoke test, artifact `GifEditor-windows` (30 days) | [config-files](config-files.md#githubworkflowsbuild-exeyml) |
+| `packaging/build-requirements.txt` | Build-only pins: `nuitka==4.3`, `ordered-set`, `zstandard`, `patchelf` (non-Windows) | [config-files](config-files.md#packagingbuild-requirementstxt) |
 | `.gitignore` | Ignores venv, caches, build output, `.devlibs/`, scratch | [config-files](config-files.md#gitignore) |
 | `AGENTS.md` | Contributor contract: rules, commands, core/UI/widget interfaces, definition of done | [config-files](config-files.md#agentsmd) |
 | `README.md` | Intro, status, features, run/check commands, keyboard shortcuts | [config-files](config-files.md#readmemd) |
-| `packaging/licenses/.gitkeep` | Empty placeholder for licence texts (M5) | — |
+| `packaging/licenses/.gitkeep` | Empty placeholder for the third-party licence texts (M5; the licence bundle is still open) | — (empty file) |
 
 Not listed: generated/ignored paths (`.venv/`, `.devlibs/`, caches) and `docs/` itself (see [docs/README.md](../README.md)).
