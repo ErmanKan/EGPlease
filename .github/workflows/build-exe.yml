@@ -31,10 +31,11 @@ jobs:
           ruff check .
           python -m pytest -q
 
-      - name: Regenerate the icon (fails if the committed icon is stale)
-        run: |
-          python scripts/make_icon.py
-          git diff --exit-code -- src/gif_editor/resources/icons
+      - name: Check the committed icons match scripts/make_icon.py (pixels, not bytes)
+        run: python scripts/make_icon.py --check
+
+      - name: Check every Nuitka flag against Nuitka's own option table
+        run: python scripts/check_build_flags.py
 
       - name: Build the single-file executable
         run: python scripts/build.py

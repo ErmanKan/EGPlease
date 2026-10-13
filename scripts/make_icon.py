@@ -63,7 +63,42 @@ def draw(size: int) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
+def check() -> int:
+    """Exit 1 if the committed icons differ from what ``draw`` produces now.
+
+    Compares decoded pixels, not file bytes: PNG/ICO compression depends on the zlib build
+    inside Pillow's wheel, which differs between Windows and Linux, so a byte comparison
+    could fail in CI on pixel-identical files.
+    """
+    stale = []
+    for size in PNG_SIZES:
+        path = OUT / f"icon-{size}.png"
+        if not path.exists():
+            stale.append(f"{path.name} missing")
+            continue
+        with Image.open(path) as committed:
+            if committed.convert("RGBA").tobytes() != draw(size).tobytes():
+                stale.append(path.name)
+    ico = OUT / "icon.ico"
+    if not ico.exists():
+        stale.append("icon.ico missing")
+    else:
+        with Image.open(ico) as im:
+            sizes = {s[0] for s in im.info.get("sizes", set())}
+        if sizes != set(ICO_SIZES):
+            stale.append(f"icon.ico sizes {sorted(sizes)} != {ICO_SIZES}")
+    if stale:
+        print("Stale icons (run scripts/make_icon.py and commit): " + ", ".join(stale))
+        return 1
+    print("Icons are up to date.")
+    return 0
+
+
 def main() -> None:
+    import sys
+
+    if "--check" in sys.argv:
+        raise SystemExit(check())
     OUT.mkdir(parents=True, exist_ok=True)
     images = {size: draw(size) for size in sorted(set(ICO_SIZES + PNG_SIZES))}
     images[256].save(OUT / "icon.png", format="PNG")
