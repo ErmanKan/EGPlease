@@ -1,7 +1,7 @@
 # RESUME HERE — Milestone 5 (packaging), one step from done
 
 **Written:** 2026-10-13, updated 2026-10-14. **Repo:** `/workspace/projects/gif-editor` (host `F:\Projects\gif-editor`), branch `main`.
-Everything is committed. Tests: **739 passed + 2 xfailed**, lint clean.
+Everything is committed. Tests: **752 passed + 2 xfailed**, lint clean.
 
 | Milestone | Status |
 |---|---|
@@ -34,7 +34,12 @@ a disabled Reset button) and in light mode.
 
 **Pushing:** the container has no GitHub credentials; push from the PC (`git push` in `F:\Projects\gif-editor`).
 
-**Next:** the dark-mode look check, the clean-Windows-11 test below, then the licence bundle.
+**Docker image added** (`Dockerfile`, README *Docker*, [dev log](04-development-log.md#docker-image)): GUI over Qt's VNC
+server (default) or X11, headless edits, a `test` target. Never built locally (no Docker here): **check the first run of
+the "Docker image" workflow** after the push and fix what it finds.
+
+**Next:** the Docker workflow's first run, the dark-mode look check, the clean-Windows-11 test below, then the licence
+bundle.
 
 ## How to build the `.exe` on Windows (cannot be done from the container)
 Nuitka cannot cross-compile, and the container has no Windows toolchain. Either:

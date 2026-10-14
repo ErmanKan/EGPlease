@@ -443,3 +443,20 @@ The real Windows palette can't be produced in the container (the offscreen platf
 ### Verification
 `tests/ui/test_theme.py` (23 cases), including rendered contrast of the real transport bar and settings panel under the dark palette. Full suite **739 passed + 2 xfailed** (was 716), HiDPI suite 306 passed at 150 % and at 200 %. Docs: new pages for `ui/theme.py` and its tests; transport, settings panel and app pages, INDEX, AGENTS (interface and widget rule), architecture tree updated.
 
+## Docker image
+
+**2026-10-14.** The user asked for a Docker container and README instructions. The app is a Windows desktop program, so the first question was what a Linux container is *for*. The image does three things: runs the editor GUI on any host, runs headless `--edit-spec` edits for scripting, and runs the test suite in a clean environment. It does not make the `.exe` (Nuitka cannot cross-compile).
+
+### Decisions
+- **GUI over Qt's VNC plugin by default.** PySide6 already ships `libqvnc.so`: with `QT_QPA_PLATFORM=vnc:size=WxH` the app is its own VNC server. That works on Windows, macOS and Linux hosts with just a VNC viewer, with no X server, socket mounts or `xhost`. X11 (`QT_QPA_PLATFORM=xcb`) stays available for Linux desktops. Verified here before writing any Docker file: the app on the VNC plugin, read back over RFB, gave a 1280×800 frame with 1067 colours. Qt's server speaks RFB **3.3** (the probe's first draft assumed 3.8 and hung).
+- **The VNC server has no password**, so every documented command publishes the port on `127.0.0.1` only (a test checks the README).
+- **System libraries measured, not copied:** `ldd` on Qt's libraries and the xcb/vnc/offscreen plugins, each mapped to its Debian package; the 8 missing in the dev container were downloaded and unpacked to a scratch folder, and with them nothing is missing (except `libqpdf.so`, whose `libQt6Pdf` is not in PySide6-Essentials and is never needed). Plus `fonts-dejavu-core`: the slim image has no fonts.
+- **Pinned base:** `python:3.13.16-slim-trixie` by digest (Docker Hub registry API), matching the project's exact-pin rule and the dev container's Debian 13.
+- **Non-root user** `app`; `--user $(id -u):$(id -g)` documented for Linux so output files belong to the host user.
+- **Stage order `app` → `test` → `runtime`.** The first draft had `test` last; a plain `docker build -t gif-editor .` (the README's command) builds the last stage, so users would have got the test image. Caught while writing the Dockerfile page; `tests/core/test_dockerfile.py` now pins it.
+
+### Verification
+- No Docker in the dev container, so the image itself is first built by the new workflow `.github/workflows/docker.yml` (tests in the container, headless edit read back, clean failure, GUI on Xvfb through the X11 plugin, GUI over VNC checked by `scripts/vnc_probe.py`).
+- Locally, without Docker: every workflow command with the same arguments (`RESULT frames=4 size=20x15`, read back as 4 frames 20×15; `ERROR GifLoadError: File not found`, exit 1; `GUI OK opened 8 frames 40x30`); the probe against the real app (exit 0) and a closed port (exit 2); the suite run in a copy of exactly the files the test image contains (746 passed, 1 skipped, 2 xfailed).
+- New tests: `test_vnc_probe.py` (7, fake RFB server), `test_dockerfile.py` (6, static checks).
+

@@ -1,0 +1,22 @@
+# Keep the build context small and free of local state. The Dockerfile copies only
+# requirements*, src/, and for the test target pyproject.toml, scripts/, tests/ and
+# packaging/build-requirements.txt; everything below never belongs in an image.
+.git/
+.github/
+.venv/
+.devlibs/
+out/
+docs/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+*.build/
+*.dist/
+*.onefile-build/
+.vscode/
+.idea/

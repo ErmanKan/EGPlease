@@ -5,6 +5,7 @@ delete frames, crop it, change its speed, frame rate, size or colours, and click
 edit is non-destructive and undoable until you generate; the original file is never touched.
 
 It ships as **one portable file, `GifEditor.exe`**: no installer, no Python, runs from any folder or a USB stick.
+A [Docker image](#docker) runs it on Linux and macOS too, and runs scripted edits.
 
 **Status:** version 0.1.0. The editor itself is complete (milestones 1–4). Packaging (milestone 5) is almost done:
 GitHub Actions builds `GifEditor.exe` and it passes the automated smoke test on Windows. Still open: a test on a clean
@@ -65,6 +66,7 @@ because browsers slow down GIFs with faster frame delays).
 | Tests | **pytest 9.1** + **pytest-qt 4.5** | pytest-qt drives real widgets (clicks, keys, signals) without a visible window. |
 | Lint and format | **ruff 0.17** | One fast tool for both. |
 | CI | **GitHub Actions** (`windows-latest`) | Nuitka cannot cross-compile, so the Windows build runs on a Windows machine; every run tests, builds and smoke-tests the `.exe`. |
+| Container | **Docker**, Debian 13 + Python 3.13 slim, pinned by digest | Runs the editor on Linux and macOS, runs scripted edits without installing Python, and runs the tests in a clean environment. The GUI uses Qt's built-in **VNC** server, which PySide6 already ships, so any VNC viewer can show it and no X server is needed. |
 
 All versions are pinned exactly in `pyproject.toml` and `requirements*.txt` so builds can be reproduced.
 
@@ -86,6 +88,7 @@ tests/         pytest suite (core + ui), with generated test GIFs
 scripts/       build, smoke test, icon generator, test helpers
 packaging/     build requirements, licence bundle
 docs/          brief, plan, architecture, dev log, GIF primer, testing guide, one page per source file
+Dockerfile     Linux image: GUI over VNC or X11, headless edits, and a test target
 ```
 
 ## Run from source
@@ -134,6 +137,61 @@ GifEditor.exe --edit-spec in.gif "trim=0:400,delete=0:3,crop=8:6:40:30,size=32x2
 ```
 Whole numbers are milliseconds and decimals are seconds. The command prints one `RESULT …` or `ERROR …` line and exits with code 0 or 1.
 Full grammar: [headless page](docs/codebase/src/gif_editor/headless.md).
+
+## Docker
+
+The image runs the editor on **Linux** (any host OS with Docker). It does not produce the Windows `.exe`
+(see [Build the .exe](#build-the-exe)). It can be used in three ways:
+
+| Use | What you need on the host |
+|---|---|
+| **GUI over VNC** (default) | a VNC viewer, e.g. TigerVNC (Windows, macOS, Linux) |
+| **GUI on an X11 display** | a Linux desktop with X11 (or XWayland) |
+| **Headless edits** (`--edit-spec`) | nothing; scripting and batch jobs |
+
+**Build** (from the repo root; the image is roughly 0.5 GB, mostly Qt):
+```bash
+docker build -t gif-editor .
+```
+
+**GUI over VNC.** Mount the folder with your GIFs at `/work`; the file dialogs open there, and results saved there
+appear on the host.
+```bash
+docker run --rm -p 127.0.0.1:5900:5900 -v "${PWD}:/work" gif-editor            # or add a file: ... gif-editor in.gif
+```
+Then connect your VNC viewer to `localhost:5900`. Closing the editor stops the container.
+- The VNC server has **no password**, which is why the port is published on `127.0.0.1` only. Don't publish it on all
+  interfaces.
+- Screen size: add `-e QT_QPA_PLATFORM=vnc:size=1920x1080` (default 1600×1000).
+- There is no window manager: dialogs open as separate windows without title bars, on top of the main window.
+- The Docker command works unchanged in PowerShell (`${PWD}` is the current folder).
+
+**GUI on an X11 display (Linux):**
+```bash
+xhost +local:            # allow local containers to use your display (undo with: xhost -local:)
+docker run --rm --user "$(id -u):$(id -g)" -e QT_QPA_PLATFORM=xcb -e DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix -v "$PWD:/work" gif-editor
+```
+
+**Headless edits** (no window and no Qt; grammar as in [Build the .exe](#build-the-exe)):
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" gif-editor \
+  --edit-spec in.gif "trim=0:2000,size=320x240,colors=64,out=small.gif"
+```
+It prints `RESULT …` (exit 0) or `ERROR …` (exit 1). `--user` makes the output file yours on Linux; omit it on
+Windows and macOS.
+
+**Tests in a container:**
+```bash
+docker build --target test -t gif-editor-test .
+docker run --rm gif-editor-test                      # the whole suite
+docker run --rm gif-editor-test tests/core -k timeline   # extra arguments go to pytest
+```
+
+The GitHub workflow **Docker image** builds both targets and checks all of this on every push: the test suite, a
+headless edit (read back and checked), the GUI on an X11 display, and the GUI over VNC (`scripts/vnc_probe.py` connects
+like a viewer and requires a non-blank screen). In the container the app uses the Linux look (Fusion, DejaVu font,
+light colours); it does not follow the Windows light/dark setting.
 
 ## Keyboard shortcuts
 

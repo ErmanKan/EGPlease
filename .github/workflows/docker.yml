@@ -1,0 +1,65 @@
+name: Docker image
+# Builds the Linux image (Dockerfile) and checks every way it is used: the test suite,
+# a headless edit, the GUI on X11 and the GUI over VNC (the image's default).
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image (runtime and test targets)
+        run: |
+          docker build --target runtime -t gif-editor .
+          docker build --target test -t gif-editor-test .
+          docker image ls gif-editor
+
+      - name: Test suite inside the container
+        run: docker run --rm gif-editor-test
+
+      - name: Headless edit on a mounted folder
+        run: |
+          mkdir -p work
+          RUN_AS="--user $(id -u):$(id -g)"
+          # A test GIF from the project's own generator: 8 frames, 40x30, 100 ms each.
+          docker run --rm $RUN_AS -v "$PWD/work:/work" --entrypoint python gif-editor-test \
+            -c "import sys; sys.path.insert(0, '/opt/gif-editor/tests'); from gifgen import make_gif, solid_frames; make_gif('/work/in.gif', solid_frames(8, (40, 30)), 100)"
+          docker run --rm $RUN_AS -v "$PWD/work:/work" gif-editor \
+            --edit-spec in.gif "trim=0:400,size=20x15,colors=16,out=out.gif" | tee edit.log
+          grep -q '^RESULT' edit.log
+          # Read the result back: 4 frames (400 ms of 100 ms frames) at 20x15.
+          docker run --rm $RUN_AS -v "$PWD/work:/work" --entrypoint python gif-editor-test -c "
+          from PIL import Image
+          im = Image.open('/work/out.gif')
+          assert im.size == (20, 15), im.size
+          assert im.n_frames == 4, im.n_frames
+          print('out.gif OK', im.size, im.n_frames, 'frames')"
+          # A missing file must fail cleanly: exit 1 and an ERROR line, no traceback.
+          set +e
+          docker run --rm $RUN_AS -v "$PWD/work:/work" gif-editor \
+            --edit-spec missing.gif "out=x.gif" > missing.log 2>&1
+          code=$?
+          set -e
+          cat missing.log
+          test "$code" = 1 && grep -q '^ERROR' missing.log && ! grep -q Traceback missing.log
+
+      - name: GUI on an X11 display (Xvfb)
+        run: |
+          Xvfb :99 -screen 0 1600x1000x24 &
+          sleep 2
+          docker run --rm --user "$(id -u):$(id -g)" -e QT_QPA_PLATFORM=xcb -e DISPLAY=:99 \
+            -v /tmp/.X11-unix:/tmp/.X11-unix -v "$PWD/work:/work" \
+            gif-editor --smoke-gui in.gif | tee xcb.log
+          grep -q '^GUI OK' xcb.log
+
+      - name: GUI over VNC (the default mode)
+        run: |
+          docker run -d --name gif-vnc -p 127.0.0.1:5900:5900 --user "$(id -u):$(id -g)" \
+            -v "$PWD/work:/work" gif-editor in.gif
+          python3 scripts/vnc_probe.py --port 5900 --wait 60
+          docker logs gif-vnc
+          docker rm -f gif-vnc

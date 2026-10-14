@@ -245,6 +245,14 @@ Rules:
 - Keep Qt imports out of `tests/conftest.py` and `tests/core/`, so core tests run with `-p no:pytest-qt`.
 - Never block waiting for a worker with `time.sleep`; use `waitUntil` or `waitSignal`, which process events.
 
+## Tests in Docker
+`docker build --target test -t gif-editor-test . && docker run --rm gif-editor-test` runs the suite in a clean Debian
+image as an unprivileged user (arguments go to pytest). The image contains only `src/`, `scripts/`, `tests/` and the
+requirement files, so `tests/core/test_dockerfile.py` skips itself there. The GitHub workflow *Docker image* runs this
+on every push, plus a headless edit, the GUI on Xvfb and the GUI over VNC (`scripts/vnc_probe.py`); see the
+[Dockerfile page](codebase/Dockerfile.md). Docker is not available in the dev container: check what you can locally
+(the probe against `QT_QPA_PLATFORM=vnc:...`, the exact commands without Docker) and let the workflow build the image.
+
 ## How to add a test
 
 1. **Pick the file.** Core module `core/<m>.py` → `tests/core/test_<m>.py`; widget `ui/…/<w>.py` → `tests/ui/test_<w>.py` (AGENTS.md).

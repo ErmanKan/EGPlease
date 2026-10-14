@@ -20,6 +20,8 @@
 | [`scripts/offscreen-screen.json`](#scriptsoffscreen-screenjson) | The virtual 3840×2160 screen for Qt's offscreen platform in `scripts/test.sh` (M4). |
 | [`packaging/build-requirements.txt`](#packagingbuild-requirementstxt) | Pinned build-only dependencies: Nuitka and its helpers (M5). |
 | [`.github/workflows/build-exe.yml`](#githubworkflowsbuild-exeyml) | Windows CI job that tests, builds, smoke-tests and uploads `GifEditor.exe` (M5). |
+| [`.github/workflows/docker.yml`](#githubworkflowsdockeryml) | Linux CI job that builds the Docker image and checks every mode: tests, headless edit, GUI on X11, GUI over VNC. |
+| [`.dockerignore`](#dockerignore) | Keeps local state (git, venv, caches, `out/`, docs) out of the Docker build context. |
 | [`src/gif_editor/resources/icons/`](#srcgif_editorresourcesicons) | The generated app icon: PNGs and a multi-size `.ico` (M5). |
 | `packaging/licenses/.gitkeep` | Empty placeholder for the third-party licence texts the `.exe` must ship with (M5, still open). |
 
@@ -88,8 +90,20 @@ The only way to get a real `GifEditor.exe` without a Windows PC set up for devel
   7. **smoke test:** `python scripts/smoke_build.py out/dist/GifEditor.exe` (fails cleanly, edits and writes a GIF, opens it in the real window offscreen);
   8. **upload:** `actions/upload-artifact@v4`, artifact name **`GifEditor-windows`**, path `out/dist/GifEditor.exe`, `if-no-files-found: error`, **kept 30 days**.
 - **Getting the file:** open the finished run on GitHub's Actions tab, scroll to *Artifacts*, download `GifEditor-windows` (a zip containing `GifEditor.exe`). Artifacts are only visible to people with access to the repository and expire after 30 days.
-- **Status:** written in M5 but **not yet run** at the time of writing: the local repository has no GitHub remote yet. Its first run will be the first real Windows build (and the first run of `make_icon.py --check` and of the smoke test on Windows).
+- **Status:** green since run 38478763559 (commit `94c54fc`, 2026-10-13): all steps including the 3 smoke steps; artifact 33.6 MB. The first two runs failed, see the dev log (*First CI run on GitHub*, *First Windows build*).
 - History: `4779648` added it; `7bac56c` replaced "regenerate the icon + `git diff --exit-code`" with `make_icon.py --check` (byte comparison of PNGs can fail across operating systems) and added the flag check.
+
+### `.github/workflows/docker.yml`
+Builds and exercises the Linux image ([Dockerfile page](Dockerfile.md)) on `ubuntu-latest`, on every push and PR (and by hand).
+- **Build:** `docker build --target runtime -t gif-editor .` and `--target test -t gif-editor-test`.
+- **Test suite in the container:** `docker run --rm gif-editor-test`.
+- **Headless edit:** a test GIF made by the project's own `tests/gifgen.py` (inside the test image) in a mounted `work/` folder; `--edit-spec in.gif "trim=0:400,size=20x15,colors=16,out=out.gif"` must print `RESULT`; the output is read back with Pillow (20×15, 4 frames); a missing input must exit 1 with an `ERROR` line and no traceback. Containers run with `--user $(id -u):$(id -g)` so they can write to the runner's folder.
+- **GUI on X11:** `Xvfb :99` on the runner, the container with `QT_QPA_PLATFORM=xcb`, `DISPLAY=:99` and the X socket mounted, `--smoke-gui in.gif` must print `GUI OK` (proves the X11 plugin and its libraries load).
+- **GUI over VNC (the default):** the container started detached with `-p 127.0.0.1:5900:5900`; [`scripts/vnc_probe.py`](scripts/vnc_probe.md) must read a non-blank screen within 60 s.
+- Every command was first run locally without Docker (same arguments, same expected output); the workflow is the first place the image itself is built, because the dev container has no Docker.
+
+### `.dockerignore`
+Excludes `.git/`, `.github/`, `.venv/`, `.devlibs/`, `out/`, `docs/`, Python caches, build and Nuitka output and editor folders from the build context. It keeps the context small (no venv or test temp files sent to the daemon) and keeps local state out of images. `tests/core/test_dockerfile.py` checks that nothing a `COPY` needs is excluded.
 
 ### `src/gif_editor/resources/icons/`
 The app icon, **generated** by [`scripts/make_icon.py`](scripts/make_icon.md) (never edited by hand; the script is the source):
@@ -122,11 +136,11 @@ The contract every contributor (human or agent) follows:
 Known drift from the code is listed in [`docs/03-architecture.md`](../03-architecture.md#known-drift-between-docs-and-code).
 
 ### `README.md`
-The front page: a short intro, the status (Milestones 1–4 done, M5 packaging in progress), a list of what works today, how to run the app on Windows (`python -m gif_editor [file.gif]`), **how to build the `.exe`** (locally on Windows, or by downloading the `GifEditor-windows` artifact from the build workflow) and the hidden `--edit-spec` mode, how to check it (Windows and `scripts/test.sh` in the container), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py` and its build commands in sync with `scripts/build.py` / `build-exe.yml`.
+The front page, written for users (rewritten 2026-10-14): intro and status, where to get the `.exe`, how to use the editor in five steps, features, **the tech stack and why each part was chosen**, the project layout, run from source, run the tests, **build the `.exe`** (Actions or a Windows PC) with the hidden `--edit-spec` mode, **Docker** (GUI over VNC or X11, headless edits, the test target), the keyboard shortcuts, and a link to [docs/README.md](../README.md). Keep its shortcut table in sync with `ui/main_window.py` and its build commands in sync with `scripts/build.py` / `build-exe.yml`.
 
 ## Invariants & gotchas
 - Pins appear in three places (`pyproject.toml`, `requirements*.txt`, the AGENTS.md "Stack" line). Change all three together. The build pins live only in `packaging/build-requirements.txt` (and Nuitka's version in the AGENTS.md Stack line).
-- `ci.yml` and `build-exe.yml` both run lint and tests; keep their commands in step.
+- `ci.yml` and `build-exe.yml` both run lint and tests; keep their commands in step. `docker.yml` runs the tests too (inside the image), and its headless/GUI commands must match the README's Docker section.
 - CI runs ruff in the opposite order to `scripts/test.sh` (lint first, then format). The result is the same.
 
 ## Tests

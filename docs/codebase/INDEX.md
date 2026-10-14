@@ -67,6 +67,8 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/core/test_selftest.py` | Self-test passes fast and catches broken internals (6) | [page](tests/core/test_selftest.md) |
 | `tests/core/test_headless.py` | `--edit-spec` grammar key by key (ms vs s, colon lists, order, case), a real run writing a 32×24 GIF, clean `ERROR` exit 1 (19) | [page](tests/core/test_headless.md) |
 | `tests/core/test_resources.py` | Icons found from source, platform format, `None` when missing, `NUITKA_ONEFILE_DIR` fallback, no raise (5) | [page](tests/core/test_resources.md) |
+| `tests/core/test_vnc_probe.py` | `vnc_probe` against a fake RFB server: both handshakes, stitching, blank retry, deadline, no server, password (7) | [page](tests/core/test_vnc_probe.md) |
+| `tests/core/test_dockerfile.py` | Static Dockerfile checks: `runtime` last, base pinned by digest, COPY sources in context, `.dockerignore`, VNC on localhost in the README (6) | [page](tests/core/test_dockerfile.md) |
 | `tests/core/test_check_build_flags.py` | Committed Nuitka flags valid for Linux and Windows; 4 injected historical bad flags caught; dropped plugin flag caught (6) | [page](tests/core/test_check_build_flags.md) |
 | `tests/ui/__init__.py` | Empty package marker | [page](tests/ui/__init__.md) |
 | `tests/ui/conftest.py` | autouse `_drain_workers` (drain the pool after every UI test), `gif_path` (8×40×30 GIF) and `doc` (open `Document`) fixtures | [page](tests/ui/conftest.md) |
@@ -100,6 +102,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `scripts/build.py` | Nuitka 4.3 onefile recipe: `build_command(ver, *, windows=None)` with every flag explained, `PYTHONPATH=src` for Nuitka, output `out/dist/GifEditor(.exe)` | [page](scripts/build.md) |
 | `scripts/check_build_flags.py` | Validates every `build.py` flag for both platforms against Nuitka's own option parser in ~1 s; guards against `--cache-dir`/`--no-console` | [page](scripts/check_build_flags.md) |
 | `scripts/make_icon.py` | Draws the icon (small sizes drawn simplified, 4× supersampling), writes PNGs + 7-size `.ico`; `--check` compares pixels | [page](scripts/make_icon.md) |
+| `scripts/vnc_probe.py` | Connects like a VNC viewer (RFB 3.3/3.8, no auth), reads one frame, fails if blank; exit 0/1/2 | [page](scripts/vnc_probe.md) |
 | `scripts/smoke_build.py` | Runs a built binary 3 times (clean failure, real edit → 32×24 GIF, `--smoke-gui`); pass/fail by exit codes and the written file | [page](scripts/smoke_build.md) |
 
 ## Config and repo files
@@ -112,6 +115,9 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `.github/workflows/build-exe.yml` | Windows build (manual or `v*` tag): lint + test, icon and flag checks, build, smoke test, artifact `GifEditor-windows` (30 days) | [config-files](config-files.md#githubworkflowsbuild-exeyml) |
 | `packaging/build-requirements.txt` | Build-only pins: `nuitka==4.3`, `ordered-set`, `zstandard`, `patchelf` (non-Windows) | [config-files](config-files.md#packagingbuild-requirementstxt) |
 | `.gitignore` | Ignores venv, caches, build output, `.devlibs/`, scratch | [config-files](config-files.md#gitignore) |
+| `Dockerfile` | Linux image: `app` → `test` (pytest) → `runtime` (default, last); measured Qt library list, pinned base, non-root, GUI over Qt's VNC server by default | [page](Dockerfile.md) |
+| `.dockerignore` | Keeps git, venv, caches, `out/`, docs out of the build context | [config-files](config-files.md#dockerignore) |
+| `.github/workflows/docker.yml` | Linux CI: build the image, tests inside it, headless edit read back, GUI on Xvfb (X11), GUI over VNC checked by `vnc_probe.py` | [config-files](config-files.md#githubworkflowsdockeryml) |
 | `AGENTS.md` | Contributor contract: rules, commands, core/UI/widget interfaces, definition of done | [config-files](config-files.md#agentsmd) |
 | `README.md` | Intro, status, features, run/check commands, keyboard shortcuts | [config-files](config-files.md#readmemd) |
 | `packaging/licenses/.gitkeep` | Empty placeholder for the third-party licence texts (M5; the licence bundle is still open) | — (empty file) |

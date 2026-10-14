@@ -234,6 +234,13 @@ Packaging rules:
 - The icon files are generated: change `scripts/make_icon.py`, rerun it, commit both; CI runs `--check`.
 - Never run two builds at once, and never delete `out/dist/` while a build runs.
 
+Docker rules (`Dockerfile`, `.github/workflows/docker.yml`):
+- `runtime` stays the **last** stage: a plain `docker build` builds the last stage (`tests/core/test_dockerfile.py` checks).
+- The base image is pinned by tag **and** digest; update both together.
+- The apt package list is measured (`ldd` on Qt's libraries and the xcb/vnc/offscreen plugins). Re-measure when PySide6 changes; a missing library shows up as a platform plugin that fails to load.
+- Qt's VNC server has no password: every documented `-p` for port 5900 binds `127.0.0.1` (the test checks the README).
+- Commands in the README's Docker section and in `docker.yml` must match; `docker` is not available in the dev container, so the workflow is the only place the image is built.
+
 Merge-key rule: `SetStateCommand` merges ANY consecutive commands with the same key, so keys are per gesture. Spinbox scrubbing uses a fixed key per setting (`"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"`, `"crop"`); each drag uses a fresh key per press (`"trim-drag-N"`, `"crop-drag-N"`) so a drag never merges with the next drag or with a following spinbox edit; discrete actions (buttons, menu items, nudges, toggles) pass `None`. Never reuse a spinbox key for a drag.
 
 Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels); colours from the palette, never hard-coded, and anything derived from it (icons, style sheets) rebuilt on `QEvent.PaletteChange` (not `ApplicationPaletteChange`, which only top-level windows get, before their palette updates); don't use `QStyle.standardIcon` media icons (invisible in dark mode, use `theme.media_icon`); only `ui/theme.py` sets the app palette.
