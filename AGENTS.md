@@ -145,6 +145,13 @@ TransportBar(doc, player, parent=None)        # ui/inspector/transport.py
   .first_button .prev_button .play_button .next_button .last_button .preview_check .info_label
 Inspector(doc, player, parent=None)           # ui/inspector/inspector.py: .canvas .transport .timebar .filmstrip
 
+# Dark-mode contrast (ui/theme.py)
+install(app)                                  # app.py, after setStyle("Fusion"): tuned palette now and on colorSchemeChanged
+apply(app) tuned_palette(base) -> QPalette   # reset to the system palette, then lift Button / disabled ButtonText if dark
+media_icon(kind, palette) -> QIcon            # kind in MEDIA_KINDS; drawn in ButtonText (+ disabled mode)
+mark_primary(button)                          # accent style sheet, text contrast >= PRIMARY_MIN_CONTRAST, follows the palette
+primary_colors(palette) primary_style_sheet(palette) contrast_ratio(a, b) relative_luminance(c) mix(a, b, t) is_dark(p)
+
 # Milestone 3
 CropPanel(doc, parent=None)                   # ui/crop_panel.py (inside SettingsPanel)
   signal errorOccurred(str)                   # a crop edit was rejected (ValueError message)
@@ -229,7 +236,7 @@ Packaging rules:
 
 Merge-key rule: `SetStateCommand` merges ANY consecutive commands with the same key, so keys are per gesture. Spinbox scrubbing uses a fixed key per setting (`"trim"`, `"speed"`, `"fps"`, `"size"`, `"quality"`, `"crop"`); each drag uses a fresh key per press (`"trim-drag-N"`, `"crop-drag-N"`) so a drag never merges with the next drag or with a following spinbox edit; discrete actions (buttons, menu items, nudges, toggles) pass `None`. Never reuse a spinbox key for a drag.
 
-Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels).
+Widget rules: construct with `(doc: Document, parent=None)`; connect to doc signals; refresh fully on `sourceChanged`; show a disabled/empty state when `doc.is_open` is False; never block the GUI thread for more than ~16 ms (use `run_async`); use `merge_key` for continuous gestures (drags, spinbox scrubbing); give custom widgets `setAccessibleName`; HiDPI-safe painting (cosmetic pens, logical pixels); colours from the palette, never hard-coded, and anything derived from it (icons, style sheets) rebuilt on `QEvent.PaletteChange` (not `ApplicationPaletteChange`, which only top-level windows get, before their palette updates); don't use `QStyle.standardIcon` media icons (invisible in dark mode, use `theme.media_icon`); only `ui/theme.py` sets the app palette.
 
 ## Documentation (required, part of done)
 - Every file in `src/`, `tests/` and `scripts/` has a page `docs/codebase/<same path without extension>.md` following `docs/codebase/_TEMPLATE.md`, and one line in `docs/codebase/INDEX.md`.

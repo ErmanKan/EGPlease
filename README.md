@@ -50,6 +50,7 @@ because browsers slow down GIFs with faster frame delays).
 - **Plain-language errors** ("that file is open in another program"), with the technical details behind **Show Details...**.
 - **Stays responsive on large GIFs:** loading, playback, preview and Generate all run off the GUI thread.
 - **Fits small screens:** usable on a 1080p laptop at 150 % scaling.
+- **Light and dark mode:** follows the Windows setting, switches live, and keeps buttons and icons clearly visible in both.
 
 ## Tech stack, and why
 

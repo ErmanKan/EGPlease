@@ -419,3 +419,27 @@ No output does not mean an early crash: stdout to a pipe is block-buffered and a
 - `smoke_build.py` names Windows crash codes (`0xC0000005 access violation`) and, when step 3 fails, reruns it without a file, with `QT_DEBUG_PLUGINS=1`, and on Windows with the native platform instead of offscreen, printing all output;
 - the workflow uploads the `.exe` even when the smoke step fails, so it can be tried on a real desktop.
 
+## Dark mode buttons
+
+**2026-10-14.** The user reported the buttons were almost invisible in Windows dark mode. The app had no dark-mode handling: Fusion takes the system palette as it is.
+
+### Measured first
+A probe (`out/probe_dark.py`, not committed) rendered the real window offscreen under an approximation of Qt's Windows dark palette (`#1E1E1E` window, `#3C3C3C` buttons, white text, accent `#0078D4`) and measured WCAG contrast on the pixels:
+- the transport icons (Qt's `SP_Media*` standard icons, dark grey glyphs) reached only **1.17 : 1** against the window, on flat (auto-raise) buttons: invisible;
+- push buttons: fill 2.0 : 1 against the window, border near-black (Fusion draws it as the window colour *darkened*);
+- disabled button text: 1.9 : 1 on its fill.
+
+The real Windows palette can't be produced in the container (the offscreen platform's system palette is light), so these numbers come from the approximation; the final check is a look at the `.exe` in Windows dark mode.
+
+### Fix: `ui/theme.py`
+- **Palette:** in dark mode the button fill is lifted to 22 % from the window towards the text colour (fill now 2.77 : 1 against the window), disabled fills to 10 %, disabled text to 55 % (3.0 : 1). Only ever lightens; light palettes are untouched. `install` re-applies it when Windows switches light/dark (after resetting to the system palette, so tuning never stacks).
+- **Transport buttons:** framed instead of auto-raise, with vector icons drawn in `ButtonText` and rebuilt on palette change (6.0 : 1 on the button).
+- **Generate:** now filled with the accent colour as the primary action. A first version set the accent through the palette, and the probe caught that Fusion lightens and desaturates palette button colours: white text on the result was **2.2–2.4 : 1**. It now uses a style sheet with exact colours, with black or white text and the fill adjusted until the text reaches 4.5 : 1 (measured 4.64 : 1 dark, 5.69 : 1 light).
+
+### Two Qt facts learned the hard way
+- `ApplicationPaletteChange` is sent only to **top-level windows**, and **before** their palette is updated; `PaletteChange` reaches every widget with the new palette. The first version listened to the wrong one and the tests caught it.
+- Qt sends no palette events to a widget that was never shown or polished, and delivers the change to shown widgets through the event loop. Tests must show the widget and `processEvents()` after `setPalette`.
+
+### Verification
+`tests/ui/test_theme.py` (23 cases), including rendered contrast of the real transport bar and settings panel under the dark palette. Full suite **739 passed + 2 xfailed** (was 716), HiDPI suite 306 passed at 150 % and at 200 %. Docs: new pages for `ui/theme.py` and its tests; transport, settings panel and app pages, INDEX, AGENTS (interface and widget rule), architecture tree updated.
+

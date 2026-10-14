@@ -116,6 +116,7 @@ Its rejected edits are **forwarded** into this panel's summary card: `crop_panel
   The service debounces (250 ms) and computes off the GUI thread, so dragging a slider shows "estimating…" and the number appears once the user stops. A failed estimate shows nothing rather than an error: the estimate is a hint, not a result.
 - An "output is empty" message if the frame count is 0, warnings from `Summary.warnings` in amber (HTML-escaped), the last error in red. A `ValueError` from `summary()` itself is shown as its message.
 - The Generate button is enabled iff a file is open and the output has ≥ 1 frame.
+- The Generate button is the window's **primary** action: bold, 1.2× font, 40 px minimum height, and filled with the accent colour by `theme.mark_primary` (a style sheet with text contrast ≥ 4.5 : 1, kept in sync with light/dark; disabled it looks like any disabled button). See [theme](theme.md).
 
 `doc.summary()` is pure arithmetic over the frame delays (no decoding), so it is cheap enough to run on the GUI thread on every change. The size estimate is **not** (it renders and encodes frames), which is why it lives in `PreviewService` and the panel only reads its last value.
 
@@ -141,3 +142,4 @@ Its rejected edits are **forwarded** into this panel's summary card: `crop_panel
 - Milestone 2: created (settings panel worker). Size equal to the base is stored as `None` so crop changes keep driving the output size.
 - `3adb5bd` (M3): `preview=` keyword, `crop_panel` embedded below Output size, crop errors forwarded to the summary card, `format_bytes` and the Size line. See [dev log, Milestone 3](../../../../04-development-log.md#milestone-3-crop-and-live-preview).
 - `39e533b` (M4): `_explain` tooltips + accessible descriptions on every input. `9361dd6` (M4): the main window pins `generate_button` outside the scroll area. See [dev log, Milestone 4](../../../../04-development-log.md#milestone-4-hardening).
+- 2026-10-14: Generate filled with the accent colour (`theme.mark_primary`), see [dev log](../../../../04-development-log.md#dark-mode-buttons).

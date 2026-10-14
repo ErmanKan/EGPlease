@@ -14,6 +14,7 @@ flowchart TB
         CMD[SetStateCommand<br/>QUndoStack]
         WK[run_async<br/>QThreadPool]
         QI[qt_image<br/>PIL → QImage]
+        TH[theme<br/>palette · icons · primary button]
         MSG[messages<br/>exception → plain explanation]
     end
     subgraph CORE["core/ (pure Python + Pillow + numpy, no Qt)"]
@@ -38,6 +39,7 @@ flowchart TB
     DOC --> CMD
     W --> WK
     W --> QI
+    W --> TH
     DOC --> PIPE
     PIPE --> TL & REN & ENC & DEC
     TL --> MOD
@@ -99,6 +101,7 @@ gif-editor/
 │     ├─ workers.py               run_async(): plain callables on QThreadPool + GUI-thread callbacks
 │     ├─ messages.py              Explanation + explain_*(): plain-language error texts (no Qt)
 │     ├─ qt_image.py              pil_to_qimage(), checkerboard_brush()
+│     ├─ theme.py                 dark-mode contrast: tuned palette, media icons, primary button
 │     ├─ settings_panel.py        SettingsPanel: timing/size/crop/quality, live summary + size estimate, Generate button
 │     ├─ crop_panel.py            CropPanel: numeric Crop group (embedded in the settings panel)
 │     ├─ main_window.py           MainWindow: layout (fits the screen, pinned Generate), actions/shortcuts, Crop menu,

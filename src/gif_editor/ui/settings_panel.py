@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from gif_editor.core.models import MAX_FPS, MAX_SPEED, MIN_SPEED, EditState, OutputSize, Quality
+from gif_editor.ui import theme
 from gif_editor.ui.crop_panel import CropPanel
 from gif_editor.ui.document import Document
 
@@ -116,6 +117,7 @@ class SettingsPanel(QWidget):
         font.setBold(True)
         font.setPointSizeF(font.pointSizeF() * 1.2)
         self.generate_button.setFont(font)
+        theme.mark_primary(self.generate_button)  # accent fill: the main action
         self.generate_button.clicked.connect(self.generateRequested)
         root.addWidget(self.generate_button)
 

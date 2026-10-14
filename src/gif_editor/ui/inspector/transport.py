@@ -3,6 +3,10 @@
 A horizontal strip of first / prev / play-pause / next / last tool buttons, a
 "Preview edits" check box, a frame-info label and a "Save frame…" button.
 
+The tool buttons are framed (not auto-raise) and their icons are drawn by
+``theme.media_icon`` in the palette's text colour, redrawn whenever the palette
+changes: Qt's built-in media icons are dark grey and vanish in dark mode.
+
 The bar drives the ``Player`` (play, step, jump) and reads the ``Document`` for the
 label. Keyboard shortcuts (Home, Left, Space, Right, End) are owned by the main
 window; the tooltips only name them. "Save frame…" just emits
@@ -11,18 +15,18 @@ window; the tooltips only name them. "Save frame…" just emits
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QStyle,
     QToolButton,
     QWidget,
 )
 
 from gif_editor.core.timeline import start_times_ms
+from gif_editor.ui import theme
 from gif_editor.ui.document import Document
 from gif_editor.ui.inspector.player import Player
 
@@ -47,25 +51,21 @@ class TransportBar(QWidget):
         self._starts: list[int] = []  # source start time of each frame (ms), cached
 
         self.setAccessibleName("Playback controls")
-        style = self.style()
-        sp = QStyle.StandardPixmap
-        self._icon_play = style.standardIcon(sp.SP_MediaPlay)
-        self._icon_pause = style.standardIcon(sp.SP_MediaPause)
 
-        def tool(icon: QStyle.StandardPixmap, name: str, key: str) -> QToolButton:
+        def tool(name: str, key: str) -> QToolButton:
             b = QToolButton(self)
-            b.setIcon(style.standardIcon(icon))
             b.setToolTip(f"{name} ({key})")
             b.setAccessibleName(name)
-            b.setAutoRaise(True)
             return b
 
-        self.first_button = tool(sp.SP_MediaSkipBackward, "First frame", "Home")
-        self.prev_button = tool(sp.SP_MediaSeekBackward, "Previous frame", "Left")
-        self.play_button = tool(sp.SP_MediaPlay, "Play/Pause", "Space")
+        self.first_button = tool("First frame", "Home")
+        self.prev_button = tool("Previous frame", "Left")
+        self.play_button = tool("Play/Pause", "Space")
         self.play_button.setCheckable(True)
-        self.next_button = tool(sp.SP_MediaSeekForward, "Next frame", "Right")
-        self.last_button = tool(sp.SP_MediaSkipForward, "Last frame", "End")
+        self.next_button = tool("Next frame", "Right")
+        self.last_button = tool("Last frame", "End")
+        self._playing = False
+        self._update_icons()
 
         self.preview_check = QCheckBox("Preview edits", self)
         self.preview_check.setToolTip(
@@ -116,6 +116,26 @@ class TransportBar(QWidget):
         self._on_source_changed()
         self._on_playing_changed(player.is_playing)
 
+    # ------------------------------------------------------------------ icons
+    def _update_icons(self) -> None:
+        """(Re)draw the tool-button icons in the current palette's text colour."""
+        pal = self.palette()
+        for button, kind in (
+            (self.first_button, "first"),
+            (self.prev_button, "prev"),
+            (self.next_button, "next"),
+            (self.last_button, "last"),
+        ):
+            button.setIcon(theme.media_icon(kind, pal))
+        self.play_button.setIcon(theme.media_icon("pause" if self._playing else "play", pal))
+
+    def changeEvent(self, event: QEvent) -> None:
+        # Light/dark switch (or any palette change): the icon colour must follow.
+        # (PaletteChange, not ApplicationPaletteChange: see ui/theme.py.)
+        if event.type() == QEvent.Type.PaletteChange:
+            self._update_icons()
+        super().changeEvent(event)
+
     # ------------------------------------------------------------------ slots
     def _on_source_changed(self) -> None:
         meta = self._doc.meta
@@ -126,7 +146,8 @@ class TransportBar(QWidget):
 
     def _on_playing_changed(self, playing: bool) -> None:
         self.play_button.setChecked(playing)
-        self.play_button.setIcon(self._icon_pause if playing else self._icon_play)
+        self._playing = playing
+        self._update_icons()
         self.play_button.setToolTip("Pause (Space)" if playing else "Play (Space)")
 
     def _on_preview_changed(self, value: bool) -> None:

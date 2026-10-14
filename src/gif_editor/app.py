@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     from gif_editor import __version__
     from gif_editor.core.selftest import SelfTestError, run_selftest
     from gif_editor.resources import icon_path
+    from gif_editor.ui import theme
     from gif_editor.ui.main_window import APP_NAME, MainWindow
 
     _stage(smoke, "creating QApplication")
@@ -96,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
+    theme.install(app)  # button contrast in dark mode; follows Windows' light/dark switch
     # Window/taskbar icon. Inside a onefile build the icon is also embedded in the
     # executable's Windows resource, but that only covers Explorer, not the running window.
     icon = icon_path()

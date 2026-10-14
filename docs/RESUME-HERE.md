@@ -1,7 +1,7 @@
 # RESUME HERE — Milestone 5 (packaging), one step from done
 
 **Written:** 2026-10-13, updated 2026-10-14. **Repo:** `/workspace/projects/gif-editor` (host `F:\Projects\gif-editor`), branch `main`.
-Everything is committed. Tests: **716 passed + 2 xfailed**, lint clean.
+Everything is committed. Tests: **739 passed + 2 xfailed**, lint clean.
 
 | Milestone | Status |
 |---|---|
@@ -26,8 +26,15 @@ file, a real edit writing a correct 32×24 GIF, and the real Qt window opening a
 The repo is on GitHub (`origin` = github.com/ErmanKan/EGPlease). Run 38478763559 (commit `94c54fc`) of
 "Build GifEditor.exe" passed every step, including all 3 smoke steps; the earlier GUI-step crash (0xC0000005) did not
 recur, and it is not proven which change cured it. Artifact `GifEditor-windows` (33.6 MB zip) expires 2026-11-12.
-**Next:** the clean-Windows-11 test below, then the licence bundle. The README was rewritten for users (stack + why,
-basic usage).
+The README was rewritten for users (stack + why, basic usage).
+
+**Dark-mode buttons fixed** (`ui/theme.py`, [dev log](04-development-log.md#dark-mode-buttons)), verified only on an
+approximated Windows dark palette: **look at the next `.exe` in Windows dark mode** (playback buttons, Generate,
+a disabled Reset button) and in light mode.
+
+**Pushing:** the container has no GitHub credentials; push from the PC (`git push` in `F:\Projects\gif-editor`).
+
+**Next:** the dark-mode look check, the clean-Windows-11 test below, then the licence bundle.
 
 ## How to build the `.exe` on Windows (cannot be done from the container)
 Nuitka cannot cross-compile, and the container has no Windows toolchain. Either:
