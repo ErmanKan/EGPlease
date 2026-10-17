@@ -39,9 +39,6 @@ Signals: `saveFrameRequested()`: the user clicked "Save frame…". The main wind
 - `tests/ui/test_theme.py`: buttons framed, icon colour follows light ↔ dark (also across the play/pause swap), and rendered contrast under a dark palette.
 - Gap: icon shapes aren't compared pixel by pixel (their colour and presence are).
 
-## Temporary crash-investigation switch
-`GIF_EDITOR_DIAG_STD_ICONS=1` (marked `[DIAG]`): `_update_icons` sets Qt's standard media icons (`_standard_icons`, the pre-theme code path) instead of `theme.media_icon`, so `scripts/smoke_build.py` can test whether the icon code matters for the packaged Windows crash. Remove it with the other `[DIAG]` switches once the cause is known.
-
 ## History
 - Milestone 2: created. Shortcuts deliberately left to the main window; save dialog left to the main window via `saveFrameRequested` so the bar stays dialog-free and testable.
 - 2026-10-14: framed buttons and palette-coloured vector icons for dark mode ([dev log](../../../../../04-development-log.md#dark-mode-buttons)).

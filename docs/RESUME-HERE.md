@@ -1,7 +1,7 @@
 # RESUME HERE — Milestone 5 (packaging), one step from done
 
 **Written:** 2026-10-13, updated 2026-10-14. **Repo:** `/workspace/projects/gif-editor` (host `F:\Projects\gif-editor`), branch `main`.
-Everything is committed. Tests: **756 passed + 2 xfailed**, lint clean.
+Everything is committed. Tests: **762 passed + 2 xfailed**, lint clean.
 
 | Milestone | Status |
 |---|---|
@@ -40,10 +40,12 @@ the "Docker image" workflow** after the push and fix what it finds.
 
 **Docker workflow:** green on its first run (`546ba31`), every step.
 
-**BLOCKER for the release: Windows GUI smoke crash** (0xC0000005, offscreen + file, in the packaged `.exe`; see
-[dev log](04-development-log.md#windows-gui-smoke-crash-in-the-packaged-exe)). Diagnostics committed; next: push, run
-*Build GifEditor.exe* by hand, read the variant tallies and the `cdb` native stack in the log, then fix the root cause
-and remove the `[DIAG]` switches (`grep -rn "GIF_EDITOR_DIAG"`).
+**Start-up crash: root cause found and fixed (2026-10-17), Windows confirmation pending.** Nuitka 4.3's injected
+PySide6 `connect` probe corrupts its function free list (stale `Py_DECREF` from PySide6); the app crashed on about half
+of all starts. Fix: `gif_editor/nuitka_compat.py` pre-answers the probe. Linux: 100/100 starts OK (was ~45% crashes).
+Also new: unpack once into `%LOCALAPPDATA%\Erman K\GIF Editor\<version>` instead of on every start (slow start-up).
+Details: [dev log](04-development-log.md#root-cause-of-the-start-up-crash). **Next:** push, run *Build GifEditor.exe*,
+check step 3 and step 4 (cold/warm start times) in the log, then the user tries the new `.exe`.
 
 **Next after that:** the release (tag `v0.1.0`; the user wants step-by-step help, and two offers are open: a workflow
 that drafts the release, and the licence bundle), the dark-mode look check, the clean-Windows-11 test below.
@@ -68,7 +70,8 @@ without Python**, from any folder and from a USB stick. Still open after that: t
 ## Things to know before building on Windows
 - **The user's C: drive was full** (232 GB of 232 GB, 216 MB free, seen 2026-10-13). A Windows build needs several GB
   on the drive holding `%TEMP%` and Nuitka's cache (`%LOCALAPPDATA%\Nuitka`), and the onefile `.exe` unpacks about
-  150 MB into `%TEMP%` on every start. Free space on C: first, or set `NUITKA_CACHE_DIR` and `TEMP`/`TMP` to F:.
+  150–230 MB into `%LOCALAPPDATA%\Erman K\GIF Editor\<version>` on its first start (since 2026-10-17; before, into
+  `%TEMP%` on every start). Free space on C: first, or set `NUITKA_CACHE_DIR` and `TEMP`/`TMP` to F:.
   A full disk shows up as "Input/output error" when unpacking, not as "disk full".
 - The Linux-only build costs (the `ldd` scan) do not apply on Windows; expect a much shorter dependency phase.
 

@@ -489,3 +489,63 @@ A fresh Linux build of the same recipe (61.6 MB): the GUI smoke step **20 of 20 
 ### Not done on purpose
 No fix yet: none of the hypotheses is confirmed, and an unconfirmed change could hide the crash without removing it. In particular, switching the smoke step to the native platform (which passed) would make CI green, but if hypothesis 1 is right the same damage exists in the real app and just did not crash there.
 
+## Slow start-up: unpack once instead of on every start
+
+**2026-10-17.** The user ran the `.exe` on the PC: "extremely slow" start-up, sometimes no window at all, several clicks needed.
+
+### Cause
+The build used Nuitka's default onefile unpacking: on **every** start the whole payload (226 MB measured for the Linux build; the Windows `.exe` is 34 MB compressed) is written to a new `%TEMP%\onefile_<pid>_<time>` folder and deleted on exit. Measured on the Linux build: start to window and back takes **0.84–1.08 s**, and the app from source **2.4 s**, so the app itself is not slow. What is expensive on Windows is writing ~150–230 MB of files per start, which Defender scans on first sight. Three things make it worse on this PC: C: was nearly full (216 MB free on 2026-10-13), so an unpack can fail outright; a crashed or killed start (see the access-violation investigation above) leaves its folder behind, using up more space; and every extra click starts another full unpack in parallel.
+
+The intermittent 0xC0000005 crash may also be what kills some of the starts. These two causes can't be told apart without data from the PC; the README now gives the user a one-line check (`Start-Process … -Wait -PassThru` → exit code).
+
+### Fix
+`--onefile-tempdir-spec={CACHE_DIR}/{COMPANY}/{PRODUCT}/{VERSION}`: unpack once per version into `%LOCALAPPDATA%\Erman K\GIF Editor\<version>` and reuse it. Read in Nuitka's bootstrap source before relying on it: a static spec selects cached mode, which CRC32-checks each file against the payload on every start and rewrites only mismatches (no stale files after a rebuild) and deletes nothing on exit. This reverses an M5 decision that kept the per-start default for portability without weighing start-up cost.
+
+### Verification
+- `scripts/check_build_flags.py`: the flag is valid for both platforms. `tests/core/test_build_startup.py` pins the spec as static (no `{PID}`/`{TIME…}`/`{RANDOM}`/`{TEMP}`).
+- `scripts/smoke_build.py` step 4 (new): the cache folder exists, no `onefile_*` folder appears in temp, and the cold and warm start times are printed (so the next Windows CI log shows the gain there).
+- Linux build with the flag: see below.
+- Linux build with the flag (61.6 MB): cold start 0.82 s, warm starts 0.74 and 0.76 s (Linux writes are cheap; the gain is on Windows), one cache folder of 226 MB, no temp leftovers; a deliberately corrupted cached `libQt6Widgets` was detected and rewritten on the next start; three simultaneous cold starts all came up.
+
+## Root cause of the start-up crash
+
+**2026-10-17.** The same Linux build then reproduced the start-up crash, which became the key to everything.
+
+### A local loop
+One of the three simultaneous starts died with `Fatal Python error: Segmentation fault` in exactly the frames seen on Windows (`_media_path` ← `media_icon` ← `TransportBar._update_icons` ← `MainWindow`). It is **not** load-dependent: started one at a time, 10–13 of 24 runs crashed; a fixed `PYTHONHASHSEED` changed nothing; limiting OpenBLAS to one thread changed nothing; the path (with or without spaces) changed nothing. The earlier 36-of-36 clean runs were a luckier build (different code, different layout). The onefile bootstrap on Linux returned exit code 0 for a crashed child, so the loop counts crashes in the log, not by exit code.
+
+### Ruling things out (each a few minutes with the loop)
+| Test | Crashes | Conclusion |
+|---|---|---|
+| `[DIAG]` standard icons instead of `theme.media_icon` | 18 / 40 | not the icon code (the crash moved to the next nested function in `TransportBar.__init__`) |
+| `[DIAG]` Qt gets only the program name | 24 / 40 | not the argument list |
+| same code from **source** (plain Python) | 0 / 40 | only the compiled build |
+| only `gif_editor` compiled (`nuitka --module`, 65 s build) under the normal interpreter | 0 / 20 | needs the full standalone build (other compiled packages share the free lists) |
+| debug build (`--debug --unstripped --no-debug-immortal-assumptions`) | 7 / 12 | reproduces; Nuitka's assertions do not catch it |
+
+### Catching it
+- gdb (Debian's, unpacked into a scratch folder like the libraries before; nothing installed) on the debug build: `Nuitka_Function_New` → `allocateFromFreeList(free_list_functions, …)` hands out `0x…873f`, a garbage address, and `_PyObject_GC_Resize` faults on it. Every crash address ended in `…73f`: **a valid address minus one**.
+- Nuitka keeps the free-list link in a released object's first word, which is `ob_refcnt`. So the link was *decremented*: a `Py_DECREF` on a function object that had already been released.
+- A gdb Python script (`out/stale_write.py`, not committed) put hardware watchpoints on released function objects whose link ended in `…740` and stopped on any write that was not Nuitka's own allocate/release. First hit: the stale `Py_DECREF`, inside `libpyside6` during `QObject::~QObject`, called from **`doesCompiledMethodLeak`** ← `protect` ← **`patched_connect`** ← `Player.__init__` (the app's first `connect`).
+
+### What that code is
+Nuitka's package configuration injects `post-import-code` into PySide6 that replaces `SignalInstance.connect`. On the first `connect` of a compiled bound method it runs a probe, `doesCompiledMethodLeak`, which connects a throw-away method to a throw-away `QObject` and deletes both, to detect non-limited-API Shiboken builds (those leak a `SystemError` on compiled functions). Destroying that `QObject` makes PySide6 drop a reference to an already-released compiled function: the free list is corrupted, and depending on the memory layout the app crashes a few function creations later.
+
+So the crash was never in our code, and not in `theme.py`: the corruption happens in Nuitka's PySide6 support on the first `connect`, and our transport bar was simply the first code that created nested functions afterwards. That is also why the first Windows build crashed before `theme.py` existed.
+
+### Fix
+`gif_editor/nuitka_compat.py`: `skip_pyside_connect_probe()` sets the probe's cached answer (`_wrap_compiled_methods`, found through `patched_connect.__globals__`) to `False` before the first `connect`, so the probe never runs. `False` is the answer the probe would give for the official PySide6 wheels, which are limited-API (abi3) builds; a test fails if PySide6 ever stops being one. `app.main` calls it right after the Qt imports and prints its status as a `GUI STAGE` line in smoke mode. The `[DIAG]` switches and their tests were removed.
+
+### The user's symptoms, explained
+- **"Sometimes it doesn't open, I click again and sometimes it runs":** this crash, on about half of all starts, before the window appears.
+- **"Extremely slow":** the per-start unpack of 150–230 MB (previous section).
+
+### Verification of the fix
+Linux release build with the fix (61.6 MB), same loops that crashed about 45% of starts before:
+- **40 of 40** starts one at a time and **60 of 60** four at a time came up (`GUI OK`); the start log shows `GUI STAGE Nuitka connect probe skipped`. (0 crashes in 100 runs at the old rate would happen by chance with a probability far below one in a billion.)
+- `scripts/smoke_build.py`: all 4 steps OK (step 4: cold start 0.6 s, warm 0.5 s, cache folder present, no temp leftovers).
+- Full suite 762 passed + 2 xfailed.
+- Still to confirm on Windows: the next *Build GifEditor.exe* run (step 3 and step 4 timings), and on the user's PC.
+
+One more finding: three copies started **at the same moment on a cold cache** (first start of a new version) can collide while unpacking; in one such test a copy died with a bus error (another copy rewrote a library it had just mapped). That is limited to the very first start of a version with several simultaneous clicks; the README asks to click once and wait for the first start.
+

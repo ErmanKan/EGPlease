@@ -104,6 +104,17 @@ def build_command(ver: str, *, windows: bool | None = None) -> list[str]:
         # report and required by the smoke test); without this a GUI app has no console.
         f"--windows-console-mode={'attach' if windows else 'disable'}",
         "--assume-yes-for-downloads",  # Nuitka's own dependency walker, on first build
+        # --- start-up speed -----------------------------------------------------------
+        # Unpack ONCE per version into the user's cache folder and reuse it:
+        # %LOCALAPPDATA%\Erman K\GIF Editor\<version> on Windows, $XDG_CACHE_HOME (or
+        # ~/.cache)/Erman K/GIF Editor/<version> on Linux. Nuitka's default unpacks the
+        # whole payload (150-230 MB) into a new %TEMP%\onefile_<pid>_<time> folder on EVERY
+        # start and deletes it on exit: slow on Windows (Defender scans every new DLL),
+        # it fails on a nearly full disk, and a crashed or killed start leaves the folder
+        # behind. With a static path Nuitka switches to its cached mode: each start compares
+        # every file's CRC32 with the payload and rewrites only mismatches
+        # (OnefileBootstrap.c), so a rebuilt .exe never runs stale files.
+        "--onefile-tempdir-spec={CACHE_DIR}/{COMPANY}/{PRODUCT}/{VERSION}",
         # Drop two heavy build-time packages this app never imports at runtime.
         "--noinclude-pytest-mode=nofollow",
         "--noinclude-setuptools-mode=nofollow",

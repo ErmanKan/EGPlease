@@ -129,7 +129,18 @@ for its cache and temp files. If C: is nearly full, point `NUITKA_CACHE_DIR`, `T
 change `scripts\build.py`, run `scripts\check_build_flags.py` first: it checks every flag in about a second instead of
 failing a long build.
 
-At startup the `.exe` unpacks itself into the temp folder (about 150 MB). It never writes next to itself.
+The first start unpacks the program once (about 150–230 MB) into `%LOCALAPPDATA%\Erman K\GIF Editor\<version>`;
+later starts reuse it and are much faster. It never writes next to itself, so it runs from any folder or a USB stick.
+Deleting that folder is safe (the next start recreates it).
+
+**If it starts slowly or doesn't open:**
+- Click it **once** and give the first start time: Windows Defender scans every newly unpacked file once. Several
+  clicks start several copies, which slows all of them down.
+- Check the free space on C: (the unpack needs about 250 MB there).
+- Older builds unpacked into a new `%TEMP%\onefile_*` folder on **every** start and left it behind when they crashed.
+  Delete those folders (PowerShell): `Get-ChildItem $env:TEMP -Directory -Filter "onefile_*" | Remove-Item -Recurse -Force`
+- See what happens by starting it from PowerShell and printing its exit code:
+  `$p = Start-Process .\GifEditor.exe -Wait -PassThru; $p.ExitCode` (`-1073741819` is a crash, 0xC0000005).
 
 **Hidden headless mode** (used by the smoke test; no window, no Qt):
 ```powershell

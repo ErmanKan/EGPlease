@@ -81,6 +81,7 @@ gif-editor/
 │  ├─ app.py                      main(): --edit-spec before any Qt import; QApplication, window icon, Pillow self-test,
 │  │                              MainWindow, optional path arg, --smoke-gui self-exit, wait for pool at exit
 │  ├─ headless.py                 M5: --edit-spec: parse a text spec, generate with no window (no Qt)
+│  ├─ nuitka_compat.py            skip Nuitka's PySide6 connect probe (memory corruption in packaged builds)
 │  ├─ resources/
 │  │  ├─ __init__.py              M5: resource_path()/icon_path(): source tree or Nuitka onefile (no Qt)
 │  │  └─ icons/                   generated app icon (icon.ico + PNGs); buttons still use Qt standard icons

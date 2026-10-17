@@ -48,9 +48,6 @@ Command line:
 - `tests/core/test_headless.py`: the `run_edit_spec` the `--edit-spec` branch calls.
 - **Gaps:** the command-line path argument; the `--edit-spec` branch in `main` (argument extraction, exit code 2) and `--smoke-gui`/`_arm_smoke_exit`, which are only exercised through [`scripts/smoke_build.py`](../../scripts/smoke_build.md) on a built binary; the window icon; the exit wait (`waitForDone`).
 
-## Temporary crash-investigation switch
-`GIF_EDITOR_DIAG_QT_ARGV=program` (marked `[DIAG]`): `QApplication` gets only `args[:1]` (the program name) instead of every argument, so `scripts/smoke_build.py` can test whether the argument list matters for the packaged Windows crash. The app parses its own arguments, so nothing else changes. Remove it with the other `[DIAG]` switches once the cause is known.
-
 ## History
 - `7a7b418`: scaffold placeholder (a `QMainWindow` with a label).
 - `be70f38`: real entry point: self-test, `MainWindow`, optional path ([dev log, Milestone 2](../../../04-development-log.md#milestone-2-window-and-inspector)).
@@ -58,4 +55,5 @@ Command line:
 - `39e533b` (M4): plain self-test failure dialog with details ([dev log, Milestone 4](../../../04-development-log.md#milestone-4-hardening)).
 - `3531ca0` (M5): `--edit-spec` handled before any Qt import; window icon from `resources.icon_path()`.
 - `7bac56c` (M5): `--smoke-gui` and `_arm_smoke_exit`; the file argument is the first non-flag argument ([dev log, Milestone 5](../../../04-development-log.md#milestone-5-packaging)).
+- 2026-10-17: `skip_pyside_connect_probe()` right after the Qt imports, before `QApplication`: keeps Nuitka's PySide6 `connect` probe from corrupting memory in the packaged build ([nuitka_compat](nuitka_compat.md)). The temporary `[DIAG]` argument switch used to rule out the arguments was removed again.
 - 2026-10-14: `theme.install(app)` after `setStyle("Fusion")` ([dev log](../../../04-development-log.md#dark-mode-buttons)).

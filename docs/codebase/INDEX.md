@@ -33,6 +33,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `ui/workers.py` | `run_async`: run a plain callable on `QThreadPool`, callbacks on the GUI thread; relay freed only after the worker left `emit()` | [page](src/gif_editor/ui/workers.md) |
 | `ui/messages.py` | `Explanation` + `explain_load_error` / `explain_load_warnings` / `explain_generate_error`: exceptions → plain-language dialog texts (no Qt) | [page](src/gif_editor/ui/messages.md) |
 | `ui/qt_image.py` | `pil_to_qimage` (thread-safe copy) and `checkerboard_brush` | [page](src/gif_editor/ui/qt_image.md) |
+| `nuitka_compat.py` | `skip_pyside_connect_probe()`: keeps Nuitka 4.3's PySide6 connect probe from corrupting memory (crashed ~half of packaged starts) | [page](src/gif_editor/nuitka_compat.md) |
 | `ui/theme.py` | Dark-mode contrast: tuned palette (lighter buttons, readable disabled text) that follows the light/dark switch, palette-coloured transport icons, accent-coloured primary button | [page](src/gif_editor/ui/theme.md) |
 | `ui/settings_panel.py` | `SettingsPanel`: left panel with timing, size, crop (embedded `CropPanel`), quality controls, the live summary card with the size estimate, and the Generate button (pinned outside the scroll area by the window); tooltips that explain each range (`_explain`); `format_bytes` | [page](src/gif_editor/ui/settings_panel.md) |
 | `ui/crop_panel.py` | `CropPanel`: the checkable Crop group (aspect preset, X/Y/W/H, Full image / Center / Reset, status); spinboxes merge as `"crop"` | [page](src/gif_editor/ui/crop_panel.md) |
@@ -69,6 +70,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/core/test_resources.py` | Icons found from source, platform format, `None` when missing, `NUITKA_ONEFILE_DIR` fallback, no raise (5) | [page](tests/core/test_resources.md) |
 | `tests/core/test_vnc_probe.py` | `vnc_probe` against a fake RFB server: both handshakes, stitching, blank retry, deadline, no server, password (7) | [page](tests/core/test_vnc_probe.md) |
 | `tests/core/test_dockerfile.py` | Static Dockerfile checks: `runtime` last, base pinned by digest, COPY sources in context, `.dockerignore`, VNC on localhost in the README (6) | [page](tests/core/test_dockerfile.md) |
+| `tests/core/test_build_startup.py` | The onefile unpack folder is static (cached mode) on both platforms; smoke_build's cache and temp-leftover helpers (4) | [page](tests/core/test_build_startup.md) |
 | `tests/core/test_check_build_flags.py` | Committed Nuitka flags valid for Linux and Windows; 4 injected historical bad flags caught; dropped plugin flag caught (6) | [page](tests/core/test_check_build_flags.md) |
 | `tests/ui/__init__.py` | Empty package marker | [page](tests/ui/__init__.md) |
 | `tests/ui/conftest.py` | autouse `_drain_workers` (drain the pool after every UI test), `gif_path` (8×40×30 GIF) and `doc` (open `Document`) fixtures | [page](tests/ui/conftest.md) |
@@ -82,7 +84,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/ui/test_timebar.py` | Mapping, seek, handles, snapping/Alt, one drag = one undo step, keyboard, painting speed (19) | [page](tests/ui/test_timebar.md) |
 | `tests/ui/test_filmstrip.py` | Model roles, thumbnails, selection/current sync, keys, context menu, stale results (16) | [page](tests/ui/test_filmstrip.md) |
 | `tests/ui/test_player.py` | Looping, preview mode, stepping, drift/skip/rebase with a fake clock, resync on edits and scrubs (22) | [page](tests/ui/test_player.md) |
-| `tests/ui/test_diag_switches.py` | The `[DIAG]` switches really change what they claim (standard icons, follows play/pause); smoke_build's variants switch one suspect each; `find_cdb` (4) | [page](tests/ui/test_diag_switches.md) |
+| `tests/ui/test_nuitka_compat.py` | Pre-answers Nuitka's connect probe only when patched; PySide6 is a limited-API build; called before any widget exists (6) | [page](tests/ui/test_nuitka_compat.md) |
 | `tests/ui/test_transport.py` | Label, play button state, step buttons, preview binding, save signal, tooltips, empty state (10) | [page](tests/ui/test_transport.md) |
 | `tests/ui/test_theme.py` | Colour maths, tuned dark palette, icon colours, readable primary colours, palette changes reach the widgets, rendered contrast in dark mode (23) | [page](tests/ui/test_theme.md) |
 | `tests/ui/test_crop_panel.py` | `CropPanel` controls → `CropRect`, clamping, aspect lock, merge keys, undo refresh, canvas sync, buttons, tick semantics, errors (32) | [page](tests/ui/test_crop_panel.md) |

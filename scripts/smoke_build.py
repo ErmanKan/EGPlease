@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,15 +79,18 @@ def run(
     if platform:
         env["QT_QPA_PLATFORM"] = platform  # headless: no display in this container or CI
     env.update(extra_env or {})
-    env["TMPDIR"] = str(workdir)  # onefile unpacks + execs here, so it must be executable
+    env["TMPDIR"] = str(workdir)  # must be executable (container); no unpacking goes here now
+    # Linux: the onefile cache ({CACHE_DIR} = $XDG_CACHE_HOME) goes into the work folder, so
+    # each smoke run starts cold and the container's noexec/full drives are avoided. Windows
+    # ignores it: {CACHE_DIR} is always %LOCALAPPDATA% there.
+    env["XDG_CACHE_HOME"] = str(workdir / "cache")
     return subprocess.run(
         [str(binary), *args], cwd=workdir, env=env, capture_output=True, text=True, timeout=timeout
     )
 
 
-#: [DIAG] Variants of step 3, each run DIAG_REPEATS times: (label, args-with-file?, platform,
-#: extra env). Two switch off one suspect each through temporary env switches read by the
-#: app (see app.py and ui/inspector/transport.py, marked [DIAG]).
+#: Variants of step 3 for the diagnostics, each run DIAG_REPEATS times:
+#: (label, arguments, platform, extra environment).
 DIAG_REPEATS = 3
 
 
@@ -95,18 +99,6 @@ def diag_variants(src: Path) -> list[tuple[str, list[str], str | None, dict[str,
     variants = [
         ("offscreen + file (the failing step)", with_file, "offscreen", {}),
         ("offscreen, no file", ["--smoke-gui"], "offscreen", {}),
-        (
-            "offscreen + file, Qt gets only the program name",
-            with_file,
-            "offscreen",
-            {"GIF_EDITOR_DIAG_QT_ARGV": "program"},
-        ),
-        (
-            "offscreen + file, Qt's standard icons instead of theme.media_icon",
-            with_file,
-            "offscreen",
-            {"GIF_EDITOR_DIAG_STD_ICONS": "1"},
-        ),
     ]
     if sys.platform == "win32":
         variants.append(("native windows platform + file", with_file, None, {}))
@@ -183,6 +175,24 @@ def diagnose_gui(run_bin: Path, src: Path, work: Path) -> None:
         native_stack(run_bin, src, work)
 
 
+def unpack_cache_dirs(workdir: Path) -> list[Path]:
+    """The onefile cache folders (``.../Erman K/GIF Editor/<version>``) this platform uses."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", ""))
+    else:
+        base = workdir / "cache"
+    product = base / "Erman K" / "GIF Editor"
+    return sorted(p for p in product.glob("*") if p.is_dir()) if product.is_dir() else []
+
+
+def temp_leftovers(workdir: Path) -> list[Path]:
+    """``onefile_*`` folders: what Nuitka's default (per-start) unpacking leaves behind."""
+    roots = {workdir}
+    if sys.platform == "win32":
+        roots.add(Path(tempfile.gettempdir()))
+    return sorted(p for r in roots for p in r.glob("onefile_*") if p.is_dir())
+
+
 def main() -> int:
     binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_binary()
     if not binary.exists():
@@ -206,10 +216,15 @@ def main() -> int:
         src = work / "in.gif"
         make_fixture(src)
 
-        # 1. Clean failure on a missing file.
+        # Folders Nuitka's default per-start unpacking would leave in temp (step 4 compares).
+        leftovers_before = set(temp_leftovers(work))
+
+        # 1. Clean failure on a missing file. Also the cold start that step 4 reports.
+        started = time.monotonic()
         res = run(
             run_bin, ["--edit-spec", str(work / "missing.gif"), f"out={work / 'x.gif'}"], work
         )
+        cold_s = time.monotonic() - started
         record("1. missing file", res.returncode == 1 and "Traceback" not in res.stderr, res)
 
         # 2. A real edit + generate, no Qt.
@@ -231,6 +246,24 @@ def main() -> int:
         record("3. GUI opens a GIF", res.returncode == 0, res)
         if res.returncode != 0:
             diagnose_gui(run_bin, src, work)
+
+        # 4. Start-up cache: the program is unpacked once into the user's cache folder and
+        # reused, and nothing is unpacked into temp. Step 1 was the cold start (fresh cache
+        # on Linux, a fresh runner on Windows); one more start here is the warm one. The
+        # times are printed, not judged: they vary too much between machines.
+        started = time.monotonic()
+        res = run(
+            run_bin, ["--edit-spec", str(work / "missing.gif"), f"out={work / 'x.gif'}"], work
+        )
+        warm_s = time.monotonic() - started
+        caches = unpack_cache_dirs(work)
+        new_leftovers = sorted(set(temp_leftovers(work)) - leftovers_before)
+        detail = f" cold start {cold_s:.1f} s, warm start {warm_s:.1f} s"
+        detail += f", cache={[str(c) for c in caches]}"
+        if new_leftovers:
+            detail += f" temp leftovers={[str(p) for p in new_leftovers]}"
+        ok = res.returncode == 1 and bool(caches) and not new_leftovers
+        record("4. start-up cache", ok, res, detail)
     except subprocess.TimeoutExpired as exc:
         failures.append(f"timed out after {exc.timeout} s: {exc.cmd}")
     finally:
