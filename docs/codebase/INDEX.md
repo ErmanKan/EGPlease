@@ -82,6 +82,7 @@ Every file in the repo (except `docs/`) with a one-line summary and a link to it
 | `tests/ui/test_timebar.py` | Mapping, seek, handles, snapping/Alt, one drag = one undo step, keyboard, painting speed (19) | [page](tests/ui/test_timebar.md) |
 | `tests/ui/test_filmstrip.py` | Model roles, thumbnails, selection/current sync, keys, context menu, stale results (16) | [page](tests/ui/test_filmstrip.md) |
 | `tests/ui/test_player.py` | Looping, preview mode, stepping, drift/skip/rebase with a fake clock, resync on edits and scrubs (22) | [page](tests/ui/test_player.md) |
+| `tests/ui/test_diag_switches.py` | The `[DIAG]` switches really change what they claim (standard icons, follows play/pause); smoke_build's variants switch one suspect each; `find_cdb` (4) | [page](tests/ui/test_diag_switches.md) |
 | `tests/ui/test_transport.py` | Label, play button state, step buttons, preview binding, save signal, tooltips, empty state (10) | [page](tests/ui/test_transport.md) |
 | `tests/ui/test_theme.py` | Colour maths, tuned dark palette, icon colours, readable primary colours, palette changes reach the widgets, rendered contrast in dark mode (23) | [page](tests/ui/test_theme.md) |
 | `tests/ui/test_crop_panel.py` | `CropPanel` controls → `CropRect`, clamping, aspect lock, merge keys, undo refresh, canvas sync, buttons, tick semantics, errors (32) | [page](tests/ui/test_crop_panel.md) |

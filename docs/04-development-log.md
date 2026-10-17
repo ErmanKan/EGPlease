@@ -460,3 +460,32 @@ The real Windows palette can't be produced in the container (the offscreen platf
 - Locally, without Docker: every workflow command with the same arguments (`RESULT frames=4 size=20x15`, read back as 4 frames 20×15; `ERROR GifLoadError: File not found`, exit 1; `GUI OK opened 8 frames 40x30`); the probe against the real app (exit 0) and a closed port (exit 2); the suite run in a copy of exactly the files the test image contains (746 passed, 1 skipped, 2 xfailed).
 - New tests: `test_vnc_probe.py` (7, fake RFB server), `test_dockerfile.py` (6, static checks).
 
+## Windows GUI smoke crash in the packaged `.exe`
+
+**2026-10-17.** The user ran *Build GifEditor.exe* (to make a release) and it failed in smoke step 3: `--smoke-gui in.gif` on the offscreen platform exited **0xC0000005** (access violation). It is the same symptom as the first Windows build (`1f292d8`, before `ui/theme.py` existed), which then passed at `94c54fc`.
+
+### Evidence from the run
+| Variant (one run each) | Result |
+|---|---|
+| offscreen + file (step 3) | crash |
+| offscreen, no file | OK |
+| offscreen + file, `QT_DEBUG_PLUGINS=1` | crash |
+| native `windows` platform + file | OK (`GUI OK opened 8 frames 64x48`) |
+
+Both crashes stopped in the same Python frames: `MainWindow.__init__` → `Inspector` → `TransportBar.__init__` → `_update_icons` → `theme.media_icon` → `theme._media_path`, the first time the theme builds an icon. That is **before** `open_file`, so up to the crash the "file" and "no file" runs execute the same code; the only difference is the argument list handed to `QApplication(args)`. The line numbers in Nuitka's frames are imprecise (`transport.py:47` and `main_window.py:66` point at function headers too), so "line 134" only says *somewhere in `_media_path`*, which only builds `QPainterPath` geometry and draws nothing.
+
+### Hypotheses (ranked)
+1. Memory damaged earlier, depending on the arguments (e.g. the `QApplication(args)` argument handling), noticed later in `_media_path`. *Prediction:* Qt given only the program name never crashes.
+2. A non-deterministic crash: "no file" passed by luck. *Prediction:* repeats show crashes in every offscreen variant.
+3. Something in Qt's offscreen platform on Windows. *Prediction:* the native platform never crashes, however often it is repeated.
+4. Nuitka compiling `_media_path`'s nested closures. *Prediction:* it would crash with or without a file; the evidence already argues against it.
+
+### Linux does not reproduce it
+A fresh Linux build of the same recipe (61.6 MB): the GUI smoke step **20 of 20 OK** (10 with a file, 10 without), and **16 of 16** with glibc's heap checks (`MALLOC_CHECK_=3`, `MALLOC_PERTURB_=165`, which make most use-after-free bugs crash). So it is Windows-specific, and the next evidence has to come from a Windows run.
+
+### Diagnostics for the next Windows run
+`scripts/smoke_build.py` now runs every variant 3 times and prints exit-code tallies, with two temporary `[DIAG]` switches that each turn off one suspect (`GIF_EDITOR_DIAG_QT_ARGV=program`: Qt gets only the program name; `GIF_EDITOR_DIAG_STD_ICONS=1`: the pre-theme icon code path), and reruns the crash under `cdb` (if the runner has it) to print the **native** stack. The run's log is enough: artifacts and logs of this repo need a GitHub login to download, so everything the analysis needs is printed. Tested locally against the Linux binary (all variants exit 0 x3; switch tests in `tests/ui/test_diag_switches.py`).
+
+### Not done on purpose
+No fix yet: none of the hypotheses is confirmed, and an unconfirmed change could hide the crash without removing it. In particular, switching the smoke step to the native platform (which passed) would make CI green, but if hypothesis 1 is right the same damage exists in the real app and just did not crash there.
+

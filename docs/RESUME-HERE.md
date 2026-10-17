@@ -1,7 +1,7 @@
 # RESUME HERE — Milestone 5 (packaging), one step from done
 
 **Written:** 2026-10-13, updated 2026-10-14. **Repo:** `/workspace/projects/gif-editor` (host `F:\Projects\gif-editor`), branch `main`.
-Everything is committed. Tests: **752 passed + 2 xfailed**, lint clean.
+Everything is committed. Tests: **756 passed + 2 xfailed**, lint clean.
 
 | Milestone | Status |
 |---|---|
@@ -38,8 +38,15 @@ a disabled Reset button) and in light mode.
 server (default) or X11, headless edits, a `test` target. Never built locally (no Docker here): **check the first run of
 the "Docker image" workflow** after the push and fix what it finds.
 
-**Next:** the Docker workflow's first run, the dark-mode look check, the clean-Windows-11 test below, then the licence
-bundle.
+**Docker workflow:** green on its first run (`546ba31`), every step.
+
+**BLOCKER for the release: Windows GUI smoke crash** (0xC0000005, offscreen + file, in the packaged `.exe`; see
+[dev log](04-development-log.md#windows-gui-smoke-crash-in-the-packaged-exe)). Diagnostics committed; next: push, run
+*Build GifEditor.exe* by hand, read the variant tallies and the `cdb` native stack in the log, then fix the root cause
+and remove the `[DIAG]` switches (`grep -rn "GIF_EDITOR_DIAG"`).
+
+**Next after that:** the release (tag `v0.1.0`; the user wants step-by-step help, and two offers are open: a workflow
+that drafts the release, and the licence bundle), the dark-mode look check, the clean-Windows-11 test below.
 
 ## How to build the `.exe` on Windows (cannot be done from the container)
 Nuitka cannot cross-compile, and the container has no Windows toolchain. Either:

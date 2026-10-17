@@ -30,6 +30,13 @@ A onefile binary cannot be imported, only run, so every check is a child process
 3. **The real window.** `--smoke-gui in.gif`. Pass: exit **0**. The app starts its `QApplication` on the offscreen platform, shows `MainWindow`, opens and decodes the GIF, then quits by itself ([app page](../src/gif_editor/app.md#how-it-works)). Proves the Qt half: PySide6, the platform plugin and the window code.
 4. Each step prints one line: step name, exit code, `ok`/`FAILED`, and the first `RESULT`/`ERROR`/`GUI` line of the output if there is one. A `TimeoutExpired` in any step is recorded as a failure (and skips the remaining steps). The temp folder is always deleted.
 
+5. **When step 3 fails: diagnostics** (`diagnose_gui`; they never change the verdict). Every variant from `diag_variants` runs `DIAG_REPEATS` = 3 times, and the script prints a tally of exit codes plus the last 40 output lines of the first failing run:
+   - offscreen + file (the failing step itself), offscreen without a file;
+   - offscreen + file with **`GIF_EDITOR_DIAG_QT_ARGV=program`** (Qt gets only the program name, not our arguments) and with **`GIF_EDITOR_DIAG_STD_ICONS=1`** (Qt's standard icons instead of `theme.media_icon`). Each switches off exactly one suspect;
+   - Windows only: the native `windows` platform + file.
+   Then, on Windows, `native_stack` reruns the failing variant under Microsoft's console debugger **`cdb`** if the machine has it (`find_cdb`: `PATH`, then the Windows SDK's `Debuggers\x64`). `-o` follows the onefile bootstrap into the child that runs the app; access violations break only at **second chance**, after `faulthandler` has printed the Python stack, and the debugger prints the last event, the registers and 40 native frames between `===NATIVE CRASH===` and `===END===`. Without `cdb` it says so.
+   Repeats matter because the crash is not deterministic: a single clean run of a variant proves little; 0 of 3 against 3 of 3 does.
+
 *Why exit codes and the file only:* the printed lines are diagnostics, not evidence. A Windows GUI executable built with console mode `attach` may not deliver its stdout to a pipe (it attaches to a parent console if there is one, and a pipe is not a console), so a check that waited for `RESULT` could fail on a working `.exe`. Exit codes and the output file are reliable on every platform.
 
 ### Two bugs found by reading it before it ever ran
@@ -56,3 +63,5 @@ It also required a `RESULT` line on stdout, which is unreliable on Windows (see 
 ## History
 - `3531ca0` (M5): first version (missing path via the GUI, plus `--edit-spec`).
 - `7bac56c` (M5): rewritten: three steps, `--smoke-gui`, pass/fail by exit code and file only ([dev log, Milestone 5](../../04-development-log.md#the-smoke-test-would-have-hung)).
+- `94c54fc` (M5): first diagnostics (one rerun per variant).
+- 2026-10-17: repeated variants with tallies, the two `[DIAG]` switches, the `cdb` native stack ([dev log](../../04-development-log.md#windows-gui-smoke-crash-in-the-packaged-exe)).

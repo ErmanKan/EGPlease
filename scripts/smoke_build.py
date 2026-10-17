@@ -84,29 +84,103 @@ def run(
     )
 
 
-def diagnose_gui(run_bin: Path, src: Path, work: Path) -> None:
-    """Step 3 failed: rerun it in variants and print everything, to locate the failure.
+#: [DIAG] Variants of step 3, each run DIAG_REPEATS times: (label, args-with-file?, platform,
+#: extra env). Two switch off one suspect each through temporary env switches read by the
+#: app (see app.py and ui/inspector/transport.py, marked [DIAG]).
+DIAG_REPEATS = 3
 
-    Diagnostics only; they never change the verdict. Variants: the window without a file
-    (is it the GIF loading?), Qt's plugin-loading log (is it a plugin?), and on Windows the
-    native platform instead of offscreen (is it the offscreen plugin?).
-    """
+
+def diag_variants(src: Path) -> list[tuple[str, list[str], str | None, dict[str, str]]]:
+    with_file = ["--smoke-gui", str(src)]
     variants = [
-        ("no file", ["--smoke-gui"], "offscreen", {}),
-        ("QT_DEBUG_PLUGINS=1", ["--smoke-gui", str(src)], "offscreen", {"QT_DEBUG_PLUGINS": "1"}),
+        ("offscreen + file (the failing step)", with_file, "offscreen", {}),
+        ("offscreen, no file", ["--smoke-gui"], "offscreen", {}),
+        (
+            "offscreen + file, Qt gets only the program name",
+            with_file,
+            "offscreen",
+            {"GIF_EDITOR_DIAG_QT_ARGV": "program"},
+        ),
+        (
+            "offscreen + file, Qt's standard icons instead of theme.media_icon",
+            with_file,
+            "offscreen",
+            {"GIF_EDITOR_DIAG_STD_ICONS": "1"},
+        ),
     ]
     if sys.platform == "win32":
-        variants.append(("native windows platform", ["--smoke-gui", str(src)], None, {}))
-    for label, args, platform, extra in variants:
-        try:
-            res = run(run_bin, args, work, timeout=90, platform=platform, extra_env=extra)
-        except subprocess.TimeoutExpired:
-            print(f"\n--- diagnostic: {label}: timed out")
-            continue
-        lines = [ln for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
-        print(f"\n--- diagnostic: {label}: exit={exit_text(res.returncode)}")
-        for ln in lines[-80:]:
+        variants.append(("native windows platform + file", with_file, None, {}))
+    return variants
+
+
+def find_cdb() -> Path | None:
+    """Microsoft's console debugger, if installed (Windows SDK 'Debugging Tools')."""
+    found = shutil.which("cdb")
+    candidates = [Path(found)] if found else []
+    for base in (os.environ.get("PROGRAMFILES(X86)"), os.environ.get("PROGRAMFILES")):
+        if base:
+            candidates.append(Path(base) / "Windows Kits" / "10" / "Debuggers" / "x64" / "cdb.exe")
+    return next((c for c in candidates if c.exists()), None)
+
+
+def native_stack(run_bin: Path, src: Path, work: Path) -> None:
+    """Windows: rerun the failing variant under cdb and print the native stack of the crash.
+
+    -o follows the onefile bootstrap into the child process that runs the app. Access
+    violations break only at second chance (after faulthandler printed the Python stack);
+    there the debugger prints the faulting instruction, registers, 40 frames, and quits.
+    """
+    cdb = find_cdb()
+    if cdb is None:
+        print("\n--- native stack: cdb not found on this machine")
+        return
+    on_crash = ".echo ===NATIVE CRASH===; .lastevent; r; kn 40; .echo ===END==="
+    cmds = f'sxn ibp; sxn epr; sxn ld; sxn ud; sxd -c2 "{on_crash}; q" av; g'
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", TMPDIR=str(work))
+    cmd = [str(cdb), "-o", "-G", "-c", cmds, str(run_bin), "--smoke-gui", str(src)]
+    try:
+        res = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        print("\n--- native stack: cdb timed out")
+        return
+    out = (res.stdout or "") + (res.stderr or "")
+    if "===NATIVE CRASH===" in out:
+        crash = out[out.index("===NATIVE CRASH===") :]
+        print("\n--- native stack (cdb):")
+        for ln in crash.splitlines()[:90]:
             print("    " + ln)
+    else:
+        code = exit_text(res.returncode)
+        print(f"\n--- native stack: no crash under cdb (exit {code}); last lines:")
+        for ln in out.splitlines()[-25:]:
+            print("    " + ln)
+
+
+def diagnose_gui(run_bin: Path, src: Path, work: Path) -> None:
+    """Step 3 failed: rerun it in variants, several times each, to locate the failure.
+
+    Diagnostics only; they never change the verdict. Per variant: how often each exit code
+    came up, and the output of the first failing run. Then, on Windows, the native stack.
+    """
+    for label, args, platform, extra in diag_variants(src):
+        codes: dict[str, int] = {}
+        first_fail: list[str] | None = None
+        for _ in range(DIAG_REPEATS):
+            try:
+                res = run(run_bin, args, work, timeout=90, platform=platform, extra_env=extra)
+            except subprocess.TimeoutExpired:
+                codes["timeout"] = codes.get("timeout", 0) + 1
+                continue
+            key = exit_text(res.returncode)
+            codes[key] = codes.get(key, 0) + 1
+            if res.returncode != 0 and first_fail is None:
+                first_fail = [ln for ln in (res.stdout + res.stderr).splitlines() if ln.strip()]
+        tally = ", ".join(f"exit {k} x{n}" for k, n in codes.items())
+        print(f"\n--- diagnostic: {label}: {tally}")
+        for ln in (first_fail or [])[-40:]:
+            print("    " + ln)
+    if sys.platform == "win32":
+        native_stack(run_bin, src, work)
 
 
 def main() -> int:

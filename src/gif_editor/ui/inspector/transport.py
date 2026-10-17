@@ -15,12 +15,15 @@ window; the tooltips only name them. "Save frame…" just emits
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QEvent, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStyle,
     QToolButton,
     QWidget,
 )
@@ -119,6 +122,9 @@ class TransportBar(QWidget):
     # ------------------------------------------------------------------ icons
     def _update_icons(self) -> None:
         """(Re)draw the tool-button icons in the current palette's text colour."""
+        if os.environ.get("GIF_EDITOR_DIAG_STD_ICONS"):  # [DIAG] crash investigation
+            self._standard_icons()
+            return
         pal = self.palette()
         for button, kind in (
             (self.first_button, "first"),
@@ -128,6 +134,19 @@ class TransportBar(QWidget):
         ):
             button.setIcon(theme.media_icon(kind, pal))
         self.play_button.setIcon(theme.media_icon("pause" if self._playing else "play", pal))
+
+    def _standard_icons(self) -> None:
+        """[DIAG] Qt's built-in media icons (the pre-theme code path), for smoke_build.py."""
+        style, sp = self.style(), QStyle.StandardPixmap
+        for button, pixmap in (
+            (self.first_button, sp.SP_MediaSkipBackward),
+            (self.prev_button, sp.SP_MediaSeekBackward),
+            (self.next_button, sp.SP_MediaSeekForward),
+            (self.last_button, sp.SP_MediaSkipForward),
+        ):
+            button.setIcon(style.standardIcon(pixmap))
+        play = sp.SP_MediaPause if self._playing else sp.SP_MediaPlay
+        self.play_button.setIcon(style.standardIcon(play))
 
     def changeEvent(self, event: QEvent) -> None:
         # Light/dark switch (or any palette change): the icon colour must follow.

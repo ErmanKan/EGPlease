@@ -6,6 +6,7 @@ main window, and optionally open a GIF passed on the command line.
 
 from __future__ import annotations
 
+import os
 import sys
 
 
@@ -93,7 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     from gif_editor.ui.main_window import APP_NAME, MainWindow
 
     _stage(smoke, "creating QApplication")
-    app = QApplication.instance() or QApplication(args)
+    # [DIAG] GIF_EDITOR_DIAG_QT_ARGV=program: hand Qt only the program name (packaged-build
+    # crash investigation, scripts/smoke_build.py). Remove with the other [DIAG] switches.
+    qt_args = args[:1] if os.environ.get("GIF_EDITOR_DIAG_QT_ARGV") == "program" else args
+    app = QApplication.instance() or QApplication(qt_args)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")

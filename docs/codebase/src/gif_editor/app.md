@@ -48,6 +48,9 @@ Command line:
 - `tests/core/test_headless.py`: the `run_edit_spec` the `--edit-spec` branch calls.
 - **Gaps:** the command-line path argument; the `--edit-spec` branch in `main` (argument extraction, exit code 2) and `--smoke-gui`/`_arm_smoke_exit`, which are only exercised through [`scripts/smoke_build.py`](../../scripts/smoke_build.md) on a built binary; the window icon; the exit wait (`waitForDone`).
 
+## Temporary crash-investigation switch
+`GIF_EDITOR_DIAG_QT_ARGV=program` (marked `[DIAG]`): `QApplication` gets only `args[:1]` (the program name) instead of every argument, so `scripts/smoke_build.py` can test whether the argument list matters for the packaged Windows crash. The app parses its own arguments, so nothing else changes. Remove it with the other `[DIAG]` switches once the cause is known.
+
 ## History
 - `7a7b418`: scaffold placeholder (a `QMainWindow` with a label).
 - `be70f38`: real entry point: self-test, `MainWindow`, optional path ([dev log, Milestone 2](../../../04-development-log.md#milestone-2-window-and-inspector)).

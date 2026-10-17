@@ -234,6 +234,8 @@ Packaging rules:
 - The icon files are generated: change `scripts/make_icon.py`, rerun it, commit both; CI runs `--check`.
 - Never run two builds at once, and never delete `out/dist/` while a build runs.
 
+Temporary `[DIAG]` switches (crash investigation, remove together once the Windows smoke crash is understood): `GIF_EDITOR_DIAG_QT_ARGV=program` in `app.main`, `GIF_EDITOR_DIAG_STD_ICONS=1` in `TransportBar._update_icons`, `tests/ui/test_diag_switches.py`, and their variants in `scripts/smoke_build.diag_variants`. Find them all with `grep -rn "\[DIAG\]\|GIF_EDITOR_DIAG"`.
+
 Docker rules (`Dockerfile`, `.github/workflows/docker.yml`):
 - `runtime` stays the **last** stage: a plain `docker build` builds the last stage (`tests/core/test_dockerfile.py` checks).
 - The base image is pinned by tag **and** digest; update both together.
